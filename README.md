@@ -85,3 +85,9 @@ Settings are stored in `%APPDATA%\UsageMeter\settings.json`.
 
 Start with `--diagnose` to write a log to `%TEMP%\usage-meter.log`
 (recreated on every start). Without the flag logging is fully disabled.
+
+## Acknowledgements
+
+Inspired by [Claude-Code-Usage-Monitor](https://github.com/CodeZeno/Claude-Code-Usage-Monitor)
+by CodeZeno. Usage Meter is an independent implementation written from
+scratch, not a fork, and shares no code with the original.
