@@ -22,17 +22,17 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, DispatchMessageW, DrawMenuBar, GetClientRect, GetCursorPos, GetMenu,
-    GetMessageW, GetSystemMetrics, GetWindowRect, IsIconic, KillTimer,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos,
+    GetMessageW, GetSystemMenu, GetSystemMetrics, GetWindowRect, InsertMenuW, IsIconic, KillTimer,
     LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SendMessageW,
-    SetForegroundWindow, SetMenu, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
+    SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
     TrackPopupMenu, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HICON, HMENU, ICON_BIG, ICON_SMALL,
-    IDC_ARROW, MB_ICONWARNING, MB_OK, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG,
-    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, TPM_RIGHTBUTTON,
+    IDC_ARROW, MB_ICONWARNING, MB_OK, MF_BYPOSITION, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, TPM_RIGHTBUTTON,
     WINDOW_EX_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_MOVE, WM_PAINT, WM_SETICON, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW,
-    WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    WM_ERASEBKGND, WM_MOVE, WM_PAINT, WM_SETICON, WM_SETTINGCHANGE, WM_SYSCOMMAND, WM_TIMER,
+    WNDCLASSW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
 };
 
 use crate::diagnose;
@@ -75,11 +75,15 @@ const WINDOW_STYLE: windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE =
 
 // --- Menu command identifiers ------------------------------------------------
 
-const ID_REFRESH: usize = 1;
-const ID_EXIT: usize = 2;
-const ID_POLL_INTERVAL_BASE: usize = 10; // 10..13
-const ID_RESET_INTERVAL_BASE: usize = 20; // 20..23
-const ID_PROVIDER_BASE: usize = 60; // 60..62
+// The settings popup also hangs off the window menu, so its commands arrive as
+// WM_SYSCOMMAND, whose low four bits of wParam are reserved by the system.
+// Hence every identifier stays below 0xF000 and 16-aligned.
+const ID_STEP: usize = 0x10;
+const ID_REFRESH: usize = 0x10;
+const ID_EXIT: usize = 0x20;
+const ID_POLL_INTERVAL_BASE: usize = 0x100; // 0x100..0x130
+const ID_RESET_INTERVAL_BASE: usize = 0x200; // 0x200..0x230
+const ID_PROVIDER_BASE: usize = 0x300; // 0x300..0x320
 
 const POLL_INTERVALS: [(u64, &str); 4] = [
     (60_000, strings::MENU_1_MINUTE),
@@ -582,7 +586,7 @@ fn refresh_dpi(hwnd: HWND) -> u32 {
     }
 }
 
-/// Outer window size for the given client size, accounting for the menu bar.
+/// Outer window size for the given client size.
 fn window_size_for_client(client_w: i32, client_h: i32, dpi: u32) -> (i32, i32) {
     let mut rect = RECT {
         left: 0,
@@ -591,8 +595,9 @@ fn window_size_for_client(client_w: i32, client_h: i32, dpi: u32) -> (i32, i32) 
         bottom: client_h,
     };
     unsafe {
-        // bmenu = true: without it the menu bar eats into the content.
-        let _ = AdjustWindowRectExForDpi(&mut rect, WINDOW_STYLE, true, WINDOW_EX_STYLE(0), dpi);
+        // bmenu = false: the settings popup hangs off the window menu, so the
+        // window has no menu bar to account for.
+        let _ = AdjustWindowRectExForDpi(&mut rect, WINDOW_STYLE, false, WINDOW_EX_STYLE(0), dpi);
     }
     (rect.right - rect.left, rect.bottom - rect.top)
 }
@@ -790,8 +795,8 @@ unsafe fn append_submenu(menu: HMENU, submenu: HMENU, text: &str) {
     let _ = AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR(wide.as_ptr()));
 }
 
-/// One builder for both the menu bar dropdown and the context menu, so they
-/// can never drift apart.
+/// One builder for both the window menu and the context menu, so they can
+/// never drift apart.
 unsafe fn build_settings_popup() -> Option<HMENU> {
     let guard = state();
     let s = guard.as_ref()?;
@@ -803,7 +808,7 @@ unsafe fn build_settings_popup() -> Option<HMENU> {
     for (i, (ms, label)) in POLL_INTERVALS.iter().enumerate() {
         append_string(
             freq,
-            ID_POLL_INTERVAL_BASE + i,
+            ID_POLL_INTERVAL_BASE + i * ID_STEP,
             label,
             s.poll_interval_ms == *ms,
         );
@@ -815,7 +820,7 @@ unsafe fn build_settings_popup() -> Option<HMENU> {
         for (i, (ms, label)) in RESET_INTERVALS.iter().enumerate() {
             append_string(
                 reset,
-                ID_RESET_INTERVAL_BASE + i,
+                ID_RESET_INTERVAL_BASE + i * ID_STEP,
                 label,
                 s.reset_credit_interval_ms == *ms,
             );
@@ -832,13 +837,13 @@ unsafe fn build_settings_popup() -> Option<HMENU> {
     );
     append_string(
         models,
-        ID_PROVIDER_BASE + 1,
+        ID_PROVIDER_BASE + ID_STEP,
         strings::PROVIDER_CODEX,
         s.show_codex,
     );
     append_string(
         models,
-        ID_PROVIDER_BASE + 2,
+        ID_PROVIDER_BASE + 2 * ID_STEP,
         strings::PROVIDER_ANTIGRAVITY,
         s.show_antigravity,
     );
@@ -849,21 +854,32 @@ unsafe fn build_settings_popup() -> Option<HMENU> {
     Some(menu)
 }
 
-/// Checked items cannot be updated in place: the menu is rebuilt from scratch
-/// and the old handle destroyed after `SetMenu`.
-fn rebuild_menu(hwnd: HWND) {
+/// The settings popup lives in the window menu, reachable from the title bar
+/// icon, a right-click on the caption and Alt+Space. Checked items cannot be
+/// updated in place, so the menu is reverted to the system default (which
+/// destroys the previous copy along with our popup) and built again.
+fn rebuild_window_menu(hwnd: HWND) {
     unsafe {
-        let Ok(bar) = CreateMenu() else { return };
+        let _ = GetSystemMenu(hwnd, true);
+        let menu = GetSystemMenu(hwnd, false);
+        if menu.is_invalid() {
+            return;
+        }
         let Some(popup) = build_settings_popup() else {
             return;
         };
-        append_submenu(bar, popup, strings::MENU_SETTINGS);
-        let old = GetMenu(hwnd);
-        if SetMenu(hwnd, Some(bar)).is_ok() {
-            if !old.is_invalid() {
-                let _ = DestroyMenu(old);
-            }
-            let _ = DrawMenuBar(hwnd);
+        let wide = to_wide(strings::MENU_SETTINGS);
+        let inserted = InsertMenuW(
+            menu,
+            0,
+            MF_BYPOSITION | MF_POPUP,
+            popup.0 as usize,
+            PCWSTR(wide.as_ptr()),
+        );
+        if inserted.is_ok() {
+            let _ = InsertMenuW(menu, 1, MF_BYPOSITION | MF_SEPARATOR, 0, PCWSTR::null());
+        } else {
+            let _ = DestroyMenu(popup);
         }
     }
 }
@@ -1299,7 +1315,7 @@ fn on_poll_interval_selected(hwnd: HWND, index: usize) {
         s.poll_interval_ms = *ms;
     }
     save_settings();
-    rebuild_menu(hwnd);
+    rebuild_window_menu(hwnd);
     set_timer(hwnd, TIMER_POLL, *ms);
 }
 
@@ -1314,7 +1330,7 @@ fn on_reset_interval_selected(hwnd: HWND, index: usize) {
         s.show_codex
     };
     save_settings();
-    rebuild_menu(hwnd);
+    rebuild_window_menu(hwnd);
     if codex_enabled {
         set_timer(hwnd, TIMER_RESET_CREDITS, *ms);
     }
@@ -1362,7 +1378,7 @@ fn on_provider_toggled(hwnd: HWND, index: usize) {
     } else {
         kill_timer(hwnd, TIMER_RESET_CREDITS);
     }
-    rebuild_menu(hwnd);
+    rebuild_window_menu(hwnd);
     resize_window_to_content(hwnd);
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -1379,16 +1395,18 @@ fn on_command(hwnd: HWND, id: usize) {
         ID_EXIT => unsafe {
             let _ = DestroyWindow(hwnd);
         },
-        _ if (ID_POLL_INTERVAL_BASE..ID_POLL_INTERVAL_BASE + POLL_INTERVALS.len()).contains(&id) => {
-            on_poll_interval_selected(hwnd, id - ID_POLL_INTERVAL_BASE);
-        }
-        _ if (ID_RESET_INTERVAL_BASE..ID_RESET_INTERVAL_BASE + RESET_INTERVALS.len())
+        _ if (ID_POLL_INTERVAL_BASE..ID_POLL_INTERVAL_BASE + POLL_INTERVALS.len() * ID_STEP)
             .contains(&id) =>
         {
-            on_reset_interval_selected(hwnd, id - ID_RESET_INTERVAL_BASE);
+            on_poll_interval_selected(hwnd, (id - ID_POLL_INTERVAL_BASE) / ID_STEP);
         }
-        _ if (ID_PROVIDER_BASE..ID_PROVIDER_BASE + 3).contains(&id) => {
-            on_provider_toggled(hwnd, id - ID_PROVIDER_BASE);
+        _ if (ID_RESET_INTERVAL_BASE..ID_RESET_INTERVAL_BASE + RESET_INTERVALS.len() * ID_STEP)
+            .contains(&id) =>
+        {
+            on_reset_interval_selected(hwnd, (id - ID_RESET_INTERVAL_BASE) / ID_STEP);
+        }
+        _ if (ID_PROVIDER_BASE..ID_PROVIDER_BASE + 3 * ID_STEP).contains(&id) => {
+            on_provider_toggled(hwnd, (id - ID_PROVIDER_BASE) / ID_STEP);
         }
         _ => {}
     }
@@ -1638,6 +1656,17 @@ extern "system" fn wnd_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LP
             on_command(hwnd, (wparam.0 & 0xFFFF) as usize);
             LRESULT(0)
         }
+        WM_SYSCOMMAND => {
+            // Our window menu commands; everything from 0xF000 up is a system
+            // command (Move, Close, ...) and belongs to the default handler.
+            let id = wparam.0 & 0xFFF0;
+            if id < 0xF000 {
+                on_command(hwnd, id);
+                LRESULT(0)
+            } else {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+        }
         WM_CONTEXTMENU => {
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
@@ -1836,10 +1865,10 @@ pub fn run() {
         }
     }
 
-    rebuild_menu(hwnd);
+    rebuild_window_menu(hwnd);
     apply_dark_titlebar(hwnd, dark);
     set_window_icons(hwnd);
-    // Refit under the real per-monitor DPI (the menu bar can also wrap).
+    // Refit under the real per-monitor DPI.
     resize_window_to_content(hwnd);
 
     // Remember the actual initial position.

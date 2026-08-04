@@ -14,7 +14,6 @@ Each value is rendered as a slim rounded fill bar with a text like
 
 ```
 Usage Meter                        ─ ×
-Settings
 ──────────────────────────────────────
   Claude Code
     5h  ████░░░░░░░░░░░  42% · 2h11m
@@ -70,8 +69,9 @@ SChannel via `native-tls`; no root certificates are bundled.
 
 ## Usage
 
-Run `usage-meter.exe`. The **Settings** menu (also available as a right-click
-context menu) provides:
+Run `usage-meter.exe`. The **Settings** menu sits in the window menu — click
+the title-bar icon, right-click the caption or press Alt+Space — and is also
+available as a right-click context menu over the window itself. It provides:
 
 - **Refresh** — poll immediately.
 - **Update Frequency** — 1 minute to 1 hour (default 15 minutes).
