@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::diagnose;
 use crate::http;
-use crate::models::{AppUsageData, CodexResetCredits, UsageData, UsageSection};
+use crate::models::{AppUsageData, CodexResetCredits, ScopedLimit, UsageData, UsageSection};
 use crate::strings;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,8 +55,9 @@ pub fn poll(
 
     if show_claude {
         match poll_claude() {
-            Ok(usage) => {
+            Ok((usage, scoped)) => {
                 data.claude_code = Some(usage);
+                data.claude_scoped = scoped;
                 any_ok = true;
             }
             Err(e) => {
@@ -533,7 +534,7 @@ fn refresh_claude_token(source: &ClaudeSource) {
     }
 }
 
-fn poll_claude() -> Result<UsageData, PollError> {
+fn poll_claude() -> Result<(UsageData, Vec<ScopedLimit>), PollError> {
     let mut sources = ClaudeSourceIter::new();
     let mut current: Option<(ClaudeSource, ClaudeCreds)> = None;
     while let Some(source) = sources.next() {
@@ -577,51 +578,53 @@ fn active_claude_source() -> std::sync::MutexGuard<'static, Option<ClaudeSource>
     ACTIVE_CLAUDE_SOURCE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn fetch_claude_usage(token: &str) -> Result<UsageData, PollError> {
+fn fetch_claude_usage(token: &str) -> Result<(UsageData, Vec<ScopedLimit>), PollError> {
     let auth = format!("Bearer {token}");
     let headers = [
         ("Authorization", auth.as_str()),
         ("anthropic-beta", CLAUDE_BETA),
     ];
+    // The Messages API fallback reports only the shared windows: model-scoped
+    // limits are available on the JSON endpoint alone.
+    let fallback = |token| claude_messages_fallback(token).map(|u| (u, Vec::new()));
     match http::get(CLAUDE_USAGE_URL, &headers) {
         Err(e) => {
             diagnose::log(&format!("claude usage endpoint request failed: {e}"));
-            claude_messages_fallback(token)
+            fallback(token)
         }
         Ok(resp) if resp.status == 401 || resp.status == 403 => {
             diagnose::log(&format!("claude usage endpoint auth error: {}", resp.status));
             Err(PollError::AuthRequired)
         }
-        Ok(resp) if resp.is_success() => match parse_claude_usage_json(&resp) {
-            Some(mut usage) => {
+        Ok(resp) if resp.is_success() => match resp.json().and_then(|v| parse_claude_usage_value(&v)) {
+            Some((mut usage, scoped)) => {
                 // The endpoint answered but without reset times: pull only the
                 // times from the Messages API, keeping the percents.
                 if usage.session.resets_at.is_none() || usage.weekly.resets_at.is_none() {
-                    if let Ok(fallback) = claude_messages_fallback(token) {
+                    if let Ok(times) = claude_messages_fallback(token) {
                         if usage.session.resets_at.is_none() {
-                            usage.session.resets_at = fallback.session.resets_at;
+                            usage.session.resets_at = times.session.resets_at;
                         }
                         if usage.weekly.resets_at.is_none() {
-                            usage.weekly.resets_at = fallback.weekly.resets_at;
+                            usage.weekly.resets_at = times.weekly.resets_at;
                         }
                     }
                 }
-                Ok(usage)
+                Ok((usage, scoped))
             }
             None => {
                 diagnose::log("claude usage endpoint returned unparseable JSON");
-                claude_messages_fallback(token)
+                fallback(token)
             }
         },
         Ok(resp) => {
             diagnose::log(&format!("claude usage endpoint status {}", resp.status));
-            claude_messages_fallback(token)
+            fallback(token)
         }
     }
 }
 
-fn parse_claude_usage_json(resp: &http::Response) -> Option<UsageData> {
-    let v = resp.json()?;
+fn parse_claude_usage_value(v: &serde_json::Value) -> Option<(UsageData, Vec<ScopedLimit>)> {
     let section = |name: &str| -> Option<UsageSection> {
         let s = v.get(name)?;
         Some(UsageSection {
@@ -638,10 +641,49 @@ fn parse_claude_usage_json(resp: &http::Response) -> Option<UsageData> {
     if five.is_none() && seven.is_none() {
         return None;
     }
-    Some(UsageData {
-        session: five.unwrap_or_default(),
-        weekly: seven.unwrap_or_default(),
-    })
+    Some((
+        UsageData {
+            session: five.unwrap_or_default(),
+            weekly: seven.unwrap_or_default(),
+        },
+        parse_claude_scoped_limits(v),
+    ))
+}
+
+/// Model-scoped weekly limits (e.g. the separate Fable window) from the
+/// `limits` array. Entries without a model display name are skipped.
+fn parse_claude_scoped_limits(v: &serde_json::Value) -> Vec<ScopedLimit> {
+    let Some(limits) = v.get("limits").and_then(|l| l.as_array()) else {
+        return Vec::new();
+    };
+    limits
+        .iter()
+        .filter_map(|entry| {
+            if entry.get("kind")?.as_str()? != "weekly_scoped" {
+                return None;
+            }
+            let label = entry
+                .get("scope")?
+                .get("model")?
+                .get("display_name")?
+                .as_str()?
+                .trim();
+            if label.is_empty() {
+                return None;
+            }
+            Some(ScopedLimit {
+                label: label.to_string(),
+                section: UsageSection {
+                    // `percent` mirrors `utilization`: already in percent.
+                    percentage: entry.get("percent")?.as_f64()?,
+                    resets_at: entry
+                        .get("resets_at")
+                        .and_then(|r| r.as_str())
+                        .and_then(parse_iso8601),
+                },
+            })
+        })
+        .collect()
 }
 
 /// Fallback: read the unified rate-limit headers off the Messages API. Even a
@@ -1470,6 +1512,35 @@ mod tests {
             .collect();
         assert_eq!(decode_console_bytes(&utf16), "Ubuntu\r\n");
         assert_eq!(decode_console_bytes("Ubuntu\r\n".as_bytes()), "Ubuntu\r\n");
+    }
+
+    #[test]
+    fn parses_claude_usage_with_scoped_limits() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"five_hour":{"utilization":5.0,"resets_at":"2026-08-04T13:59:59Z"},
+                "seven_day":{"utilization":25.0,"resets_at":"2026-08-09T08:59:59Z"},
+                "limits":[
+                  {"kind":"session","group":"session","percent":5,"resets_at":"2026-08-04T13:59:59Z","scope":null},
+                  {"kind":"weekly_all","group":"weekly","percent":25,"resets_at":"2026-08-09T08:59:59Z","scope":null},
+                  {"kind":"weekly_scoped","group":"weekly","percent":17,"resets_at":"2026-08-09T09:00:00Z",
+                   "scope":{"model":{"id":null,"display_name":"Fable"},"surface":null}}]}"#,
+        )
+        .unwrap();
+        let (usage, scoped) = parse_claude_usage_value(&v).unwrap();
+        assert_eq!(usage.session.percentage, 5.0);
+        assert_eq!(usage.weekly.percentage, 25.0);
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].label, "Fable");
+        assert_eq!(scoped[0].section.percentage, 17.0);
+        assert!(scoped[0].section.resets_at.is_some());
+
+        // No limits array (older responses, other plans): no scoped rows.
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"five_hour":{"utilization":5.0,"resets_at":"2026-08-04T13:59:59Z"}}"#,
+        )
+        .unwrap();
+        let (_, scoped) = parse_claude_usage_value(&v).unwrap();
+        assert!(scoped.is_empty());
     }
 
     #[test]

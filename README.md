@@ -5,7 +5,7 @@ used up, for three providers at once:
 
 | Provider | What it shows |
 |---|---|
-| **Claude Code** (Anthropic) | 5-hour window and 7-day window |
+| **Claude Code** (Anthropic) | 5-hour window, 7-day window, and per-model weekly limits (e.g. Fable) when the account has them |
 | **Codex** (OpenAI/ChatGPT) | both rate-limit windows plus granted rate-limit reset credits |
 | **Antigravity** (Google) | 5-hour and weekly Gemini quota |
 

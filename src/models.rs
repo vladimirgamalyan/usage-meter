@@ -24,10 +24,22 @@ pub struct UsageData {
     pub weekly: UsageSection,
 }
 
+/// A weekly limit scoped to a single model (e.g. Fable), reported by the
+/// Claude usage endpoint alongside the shared windows.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScopedLimit {
+    /// Model display name from the API, shown as the row label.
+    pub label: String,
+    pub section: UsageSection,
+}
+
 /// Result of one poll round across all enabled providers.
 #[derive(Clone, Debug, Default)]
 pub struct AppUsageData {
     pub claude_code: Option<UsageData>,
+    /// Model-scoped weekly limits reported by the Claude usage endpoint;
+    /// empty when the endpoint (or the fallback path) does not report any.
+    pub claude_scoped: Vec<ScopedLimit>,
     pub codex: Option<UsageData>,
     pub antigravity: Option<UsageData>,
     /// `available_count` piggybacked on the Codex usage response; used as a

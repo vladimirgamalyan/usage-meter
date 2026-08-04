@@ -54,6 +54,9 @@ const BAR_WIDTH: i32 = 109;
 /// and vertically centered in it.
 const BAR_HEIGHT: i32 = 7;
 const LABEL_WIDTH: i32 = 18;
+/// Wider label column used while a model-scoped row (e.g. Fable) is shown:
+/// model names do not fit the two-character default.
+const LABEL_WIDTH_WIDE: i32 = 34;
 const LABEL_RIGHT_MARGIN: i32 = 10;
 const BAR_RIGHT_MARGIN: i32 = 4;
 const TEXT_WIDTH: i32 = 86;
@@ -180,6 +183,15 @@ struct ProviderView {
     text_5h: String,
     pct_7d: f64,
     text_7d: String,
+    /// Model-scoped weekly rows; only Claude reports these today.
+    scoped: Vec<ScopedRowView>,
+}
+
+#[derive(Default, Clone)]
+struct ScopedRowView {
+    label: String,
+    pct: f64,
+    text: String,
 }
 
 struct AppState {
@@ -239,6 +251,7 @@ fn placeholder_view(text: &str) -> ProviderView {
         text_5h: text.to_string(),
         pct_7d: 0.0,
         text_7d: text.to_string(),
+        scoped: Vec::new(),
     }
 }
 
@@ -248,6 +261,9 @@ fn set_enabled_texts(s: &mut AppState, text: &str) {
     if s.show_claude {
         s.claude.text_5h = text.to_string();
         s.claude.text_7d = text.to_string();
+        for row in &mut s.claude.scoped {
+            row.text = text.to_string();
+        }
     }
     if s.show_codex {
         s.codex.text_5h = text.to_string();
@@ -278,6 +294,23 @@ fn apply_usage_data(s: &mut AppState, data: &AppUsageData, now: SystemTime) {
     }
     if s.show_claude {
         apply(&mut s.claude, data.claude_code.as_ref(), now);
+        if data.claude_code.is_some() {
+            s.claude.scoped = data
+                .claude_scoped
+                .iter()
+                .map(|l| ScopedRowView {
+                    label: l.label.clone(),
+                    pct: l.section.percentage,
+                    text: poller::format_usage_text(&l.section, now),
+                })
+                .collect();
+        } else {
+            // Keep the rows through a failed poll (matching 5h/7d, which show
+            // `!` instead of disappearing).
+            for row in &mut s.claude.scoped {
+                row.text = strings::PLACEHOLDER_ERROR.to_string();
+            }
+        }
     }
     if s.show_codex {
         apply(&mut s.codex, data.codex.as_ref(), now);
@@ -340,7 +373,7 @@ fn palette(dark: bool) -> Palette {
 
 #[derive(Clone)]
 struct RenderRow {
-    label: &'static str,
+    label: String,
     percent: f64,
     text: String,
     has_bar: bool,
@@ -360,6 +393,17 @@ struct RenderModel {
     dark: bool,
 }
 
+impl RenderModel {
+    /// Model-scoped rows carry model names that outgrow the default
+    /// two-character label column.
+    fn wide_labels(&self) -> bool {
+        self.blocks
+            .iter()
+            .flat_map(|b| &b.rows)
+            .any(|r| r.label.chars().count() > 2)
+    }
+}
+
 fn build_render_model() -> RenderModel {
     let guard = state();
     let Some(s) = guard.as_ref() else {
@@ -375,13 +419,13 @@ fn build_render_model() -> RenderModel {
     let usage_rows = |view: &ProviderView| {
         vec![
             RenderRow {
-                label: strings::LABEL_5H,
+                label: strings::LABEL_5H.to_string(),
                 percent: view.pct_5h,
                 text: view.text_5h.clone(),
                 has_bar: true,
             },
             RenderRow {
-                label: strings::LABEL_7D,
+                label: strings::LABEL_7D.to_string(),
                 percent: view.pct_7d,
                 text: view.text_7d.clone(),
                 has_bar: true,
@@ -391,18 +435,27 @@ fn build_render_model() -> RenderModel {
     // With a single provider the window title already names it: values are
     // drawn in a neutral color and block headings are skipped entirely.
     if s.show_claude {
+        let mut rows = usage_rows(&s.claude);
+        for row in &s.claude.scoped {
+            rows.push(RenderRow {
+                label: row.label.clone(),
+                percent: row.pct,
+                text: row.text.clone(),
+                has_bar: true,
+            });
+        }
         blocks.push(RenderBlock {
             title: strings::PROVIDER_CLAUDE_CODE,
             accent: pal.accent_claude,
             value_color: if multi { pal.value_claude } else { pal.value_codex },
-            rows: usage_rows(&s.claude),
+            rows,
         });
     }
     if s.show_codex {
         let mut rows = usage_rows(&s.codex);
         for line in &s.codex_reset_lines {
             rows.push(RenderRow {
-                label: strings::LABEL_RESET_CREDIT,
+                label: strings::LABEL_RESET_CREDIT.to_string(),
                 percent: 0.0,
                 text: line.clone(),
                 has_bar: false,
@@ -458,12 +511,13 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn new(dpi: u32) -> Self {
+    fn new(dpi: u32, wide_labels: bool) -> Self {
+        let label_width = if wide_labels { LABEL_WIDTH_WIDE } else { LABEL_WIDTH };
         Self {
             row_h: sc(ROW_HEIGHT, dpi),
             bar_w: sc(BAR_WIDTH, dpi),
             bar_h: sc(BAR_HEIGHT, dpi),
-            label_w: sc(LABEL_WIDTH, dpi),
+            label_w: sc(label_width, dpi),
             label_margin: sc(LABEL_RIGHT_MARGIN, dpi),
             bar_margin: sc(BAR_RIGHT_MARGIN, dpi),
             text_w: sc(TEXT_WIDTH, dpi),
@@ -545,7 +599,7 @@ fn window_size_for_client(client_w: i32, client_h: i32, dpi: u32) -> (i32, i32) 
 
 fn desired_window_size(dpi: u32) -> (i32, i32) {
     let model = build_render_model();
-    let metrics = Metrics::new(dpi);
+    let metrics = Metrics::new(dpi, model.wide_labels());
     let client_w = metrics.client_width();
     let client_h = metrics.content_height(&model);
     window_size_for_client(client_w, client_h, dpi)
@@ -1074,6 +1128,9 @@ fn any_window_overdue(s: &AppState, now: SystemTime) -> bool {
             sections.push(u.session.resets_at);
             sections.push(u.weekly.resets_at);
         }
+        for l in &data.claude_scoped {
+            sections.push(l.section.resets_at);
+        }
     }
     if s.show_codex {
         if let Some(u) = &data.codex {
@@ -1091,7 +1148,7 @@ fn any_window_overdue(s: &AppState, now: SystemTime) -> bool {
 }
 
 /// Schedule the countdown timer for the earliest upcoming text change across
-/// all visible values (six usage values plus the reset-credit lines).
+/// all visible values (the usage rows plus the reset-credit lines).
 fn reschedule_countdown(hwnd: HWND) {
     let now = SystemTime::now();
     let mut min_secs: Option<u64> = None;
@@ -1108,6 +1165,9 @@ fn reschedule_countdown(hwnd: HWND) {
                 if let Some(u) = &data.claude_code {
                     consider(u.session.resets_at);
                     consider(u.weekly.resets_at);
+                }
+                for l in &data.claude_scoped {
+                    consider(l.section.resets_at);
                 }
             }
             if s.show_codex {
@@ -1174,6 +1234,8 @@ fn on_data_updated(hwnd: HWND) {
         kill_timer(hwnd, TIMER_FAST_POLL);
         kill_timer(hwnd, TIMER_COUNTDOWN);
     }
+    // A model-scoped row appearing or disappearing changes the row count.
+    resize_window_to_content(hwnd);
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
@@ -1407,7 +1469,7 @@ unsafe fn on_paint(hwnd: HWND) {
     let dpi = refresh_dpi(hwnd);
     let model = build_render_model();
     let pal = palette(model.dark);
-    let m = Metrics::new(dpi);
+    let m = Metrics::new(dpi, model.wide_labels());
 
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
@@ -1472,7 +1534,7 @@ unsafe fn on_paint(hwnd: HWND) {
             }
             draw_text_in(
                 mem,
-                row.label,
+                &row.label,
                 RECT {
                     left: row_x,
                     top: y,
@@ -1686,8 +1748,8 @@ pub fn run() {
     // Initial sizing uses the system DPI; the window is refit to its
     // per-monitor DPI right after creation.
     let dpi = current_dpi();
-    let metrics = Metrics::new(dpi);
     let initial_model = initial_render_model(&settings);
+    let metrics = Metrics::new(dpi, initial_model.wide_labels());
     let client_w = metrics.client_width();
     let client_h = metrics.content_height(&initial_model);
     let (win_w, win_h) = window_size_for_client(client_w, client_h, dpi);
@@ -1824,13 +1886,13 @@ fn initial_render_model(settings: &Settings) -> RenderModel {
     let empty_rows = || {
         vec![
             RenderRow {
-                label: strings::LABEL_5H,
+                label: strings::LABEL_5H.to_string(),
                 percent: 0.0,
                 text: String::new(),
                 has_bar: true,
             },
             RenderRow {
-                label: strings::LABEL_7D,
+                label: strings::LABEL_7D.to_string(),
                 percent: 0.0,
                 text: String::new(),
                 has_bar: true,
