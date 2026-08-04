@@ -183,8 +183,8 @@ struct ProviderView {
 }
 
 struct AppState {
-    /// Kept per SPEC §4 (state carries the window handle); threads receive the
-    /// handle explicitly, so it is not read back.
+    /// The shared state carries the window handle for completeness; threads
+    /// receive the handle explicitly, so it is not read back.
     #[allow(dead_code)]
     hwnd: isize,
     dark: bool,
