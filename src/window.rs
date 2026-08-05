@@ -206,6 +206,14 @@ struct ScopedRowView {
     text: String,
 }
 
+/// One-at-a-time slot for a background request: a request asked for while one
+/// is running is dropped, or queued as a single rerun.
+#[derive(Default)]
+struct RequestSlot {
+    in_flight: bool,
+    rerun_pending: bool,
+}
+
 struct AppState {
     /// The shared state carries the window handle for completeness; threads
     /// receive the handle explicitly, so it is not read back.
@@ -230,6 +238,12 @@ struct AppState {
     cred_watch_mode: Option<CredWatchMode>,
     cred_watch_snapshot: Vec<String>,
     last_poll_ok: bool,
+    /// Whether the fast poll timer is running, so a countdown tick can tell an
+    /// expiry that has just happened from one already being polled for.
+    fast_poll_active: bool,
+    /// One slot per endpoint: the usage poll and the Codex reset-credit list.
+    poll_slot: RequestSlot,
+    credits_slot: RequestSlot,
     window_x: Option<i32>,
     window_y: Option<i32>,
 }
@@ -956,9 +970,77 @@ fn post_to_window(handle: HwndHandle, message: u32) {
     }
 }
 
+/// Picks the slot a request runs in; one slot per endpoint.
+type SlotPick = fn(&mut AppState) -> &mut RequestSlot;
+
+const POLL_SLOT: SlotPick = |s| &mut s.poll_slot;
+const CREDITS_SLOT: SlotPick = |s| &mut s.credits_slot;
+
+/// Take the slot, so requests asked for at nearly the same time (a timer, a
+/// forced poll, a user action) cannot be sent back to back. A request that must
+/// not be lost passes `queue_if_busy` and then runs right after the current one
+/// instead of being dropped.
+fn acquire_slot(pick: SlotPick, queue_if_busy: bool) -> bool {
+    let mut guard = state();
+    let Some(s) = guard.as_mut() else { return false };
+    let slot = pick(s);
+    if slot.in_flight {
+        slot.rerun_pending |= queue_if_busy;
+        return false;
+    }
+    slot.in_flight = true;
+    true
+}
+
+/// Frees the slot on every exit path of `run_guarded`.
+struct SlotGuard(SlotPick);
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        let mut guard = state();
+        if let Some(s) = guard.as_mut() {
+            *(self.0)(s) = RequestSlot::default();
+        }
+    }
+}
+
+/// Run `body` alone in its slot, plus one rerun when a request arrived while it
+/// ran.
+fn run_guarded(pick: SlotPick, queue_if_busy: bool, mut body: impl FnMut()) {
+    if !acquire_slot(pick, queue_if_busy) {
+        return;
+    }
+    let _slot = SlotGuard(pick);
+    loop {
+        body();
+        let mut guard = state();
+        let Some(s) = guard.as_mut() else { return };
+        if !std::mem::take(&mut pick(s).rerun_pending) {
+            return;
+        }
+    }
+}
+
+fn run_poll(handle: HwndHandle, queue_if_busy: bool) {
+    run_guarded(POLL_SLOT, queue_if_busy, || poll_body(handle));
+}
+
+fn run_reset_credits(handle: HwndHandle, queue_if_busy: bool) {
+    run_guarded(CREDITS_SLOT, queue_if_busy, || reset_credits_body(handle));
+}
+
+/// Poll on a timer: skipped when a poll is already running.
 fn spawn_poll(hwnd: HWND) {
     let handle = HwndHandle::new(hwnd);
-    std::thread::spawn(move || poll_body(handle));
+    std::thread::spawn(move || run_poll(handle, false));
+}
+
+/// Poll for a user action (refresh, provider toggle): queued behind a running
+/// poll rather than dropped, otherwise the rows would stay on `...` until the
+/// next timer.
+fn spawn_user_poll(hwnd: HWND) {
+    let handle = HwndHandle::new(hwnd);
+    std::thread::spawn(move || run_poll(handle, true));
 }
 
 /// One poll round: network in this background thread, state update under the
@@ -1063,13 +1145,24 @@ fn poll_body(handle: HwndHandle) {
     }
 
     if refetch_credits {
-        reset_credits_body(handle);
+        // The count changed: the list must be re-read, so this one is queued
+        // rather than dropped when a fetch is already running.
+        run_reset_credits(handle, true);
     }
 }
 
+/// Fetch the credit list on a timer or at startup: skipped when a fetch is
+/// already running.
 fn spawn_reset_credits_poll(hwnd: HWND) {
     let handle = HwndHandle::new(hwnd);
-    std::thread::spawn(move || reset_credits_body(handle));
+    std::thread::spawn(move || run_reset_credits(handle, false));
+}
+
+/// Fetch for a user action (refresh, enabling Codex): queued behind a running
+/// fetch rather than dropped.
+fn spawn_user_reset_credits_poll(hwnd: HWND) {
+    let handle = HwndHandle::new(hwnd);
+    std::thread::spawn(move || run_reset_credits(handle, true));
 }
 
 fn reset_credits_body(handle: HwndHandle) {
@@ -1130,7 +1223,7 @@ fn snapshot_check_body(handle: HwndHandle) {
         set_enabled_texts(s, strings::PLACEHOLDER_LOADING);
     }
     post_to_window(handle, MSG_DATA_UPDATED);
-    poll_body(handle);
+    run_poll(handle, true);
 }
 
 fn spawn_snapshot_check(hwnd: HWND) {
@@ -1149,6 +1242,19 @@ fn set_timer(hwnd: HWND, id: usize, ms: u64) {
 fn kill_timer(hwnd: HWND, id: usize) {
     unsafe {
         let _ = KillTimer(Some(hwnd), id);
+    }
+}
+
+/// Start or stop the fast poll timer, recording the state in `AppState`.
+fn set_fast_poll(hwnd: HWND, active: bool) {
+    if active {
+        set_timer(hwnd, TIMER_FAST_POLL, FAST_POLL_MS as u64);
+    } else {
+        kill_timer(hwnd, TIMER_FAST_POLL);
+    }
+    let mut guard = state();
+    if let Some(s) = guard.as_mut() {
+        s.fast_poll_active = active;
     }
 }
 
@@ -1262,22 +1368,18 @@ fn on_data_updated(hwnd: HWND) {
         // The poll timer keeps ticking, but only to compare credential
         // snapshots; countdown and fast-poll timers stop.
         kill_timer(hwnd, TIMER_COUNTDOWN);
-        kill_timer(hwnd, TIMER_FAST_POLL);
+        set_fast_poll(hwnd, false);
         set_timer(hwnd, TIMER_POLL, interval);
     } else if ok {
         set_timer(hwnd, TIMER_POLL, interval);
-        if overdue {
-            // The server usually updates the numbers with a delay after a
-            // window resets: poll frequently until nothing is overdue.
-            set_timer(hwnd, TIMER_FAST_POLL, FAST_POLL_MS as u64);
-        } else {
-            kill_timer(hwnd, TIMER_FAST_POLL);
-        }
+        // The server usually updates the numbers with a delay after a window
+        // resets: poll frequently until nothing is overdue.
+        set_fast_poll(hwnd, overdue);
         reschedule_countdown(hwnd);
     } else {
         // Transient failure: exponential backoff, capped at the poll interval.
         set_timer(hwnd, TIMER_POLL, retry_delay_ms(retry, interval));
-        kill_timer(hwnd, TIMER_FAST_POLL);
+        set_fast_poll(hwnd, false);
         kill_timer(hwnd, TIMER_COUNTDOWN);
     }
     // A model-scoped row appearing or disappearing changes the row count.
@@ -1289,7 +1391,7 @@ fn on_data_updated(hwnd: HWND) {
 
 fn on_countdown_tick(hwnd: HWND) {
     let now = SystemTime::now();
-    {
+    let just_expired = {
         let mut guard = state();
         let Some(s) = guard.as_mut() else { return };
         // Only recompute from real data; placeholders stay as they are.
@@ -1299,11 +1401,20 @@ fn on_countdown_tick(hwnd: HWND) {
             }
         }
         recompute_reset_lines(s, now);
-    }
+        // A window that reached its reset time between two polls: the numbers
+        // on screen are stale (the row is stuck at `now`), so the wait for the
+        // next regular poll is dropped and a poll is fired right away.
+        !s.auth_error_paused_polling && !s.fast_poll_active && any_window_overdue(s, now)
+    };
     // An expired reset credit removes its line: the window may shrink.
     resize_window_to_content(hwnd);
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    if just_expired {
+        diagnose::log("reset time reached: polling immediately");
+        set_fast_poll(hwnd, true);
+        spawn_poll(hwnd);
     }
     reschedule_countdown(hwnd);
 }
@@ -1329,9 +1440,9 @@ fn on_refresh(hwnd: HWND) {
         let guard = state();
         guard.as_ref().map(|s| s.show_codex).unwrap_or(false)
     };
-    spawn_poll(hwnd);
+    spawn_user_poll(hwnd);
     if codex_enabled {
-        spawn_reset_credits_poll(hwnd);
+        spawn_user_reset_credits_poll(hwnd);
     }
 }
 
@@ -1413,9 +1524,9 @@ fn on_provider_toggled(hwnd: HWND, index: usize) {
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
-    spawn_poll(hwnd);
+    spawn_user_poll(hwnd);
     if codex_on_now && !codex_was_on {
-        spawn_reset_credits_poll(hwnd);
+        spawn_user_reset_credits_poll(hwnd);
     }
 }
 
@@ -1922,6 +2033,9 @@ pub fn run() {
             cred_watch_mode: None,
             cred_watch_snapshot: Vec::new(),
             last_poll_ok: false,
+            fast_poll_active: false,
+            poll_slot: RequestSlot::default(),
+            credits_slot: RequestSlot::default(),
             window_x: settings.window_x,
             window_y: settings.window_y,
         });
