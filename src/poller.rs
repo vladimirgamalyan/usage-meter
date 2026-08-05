@@ -229,7 +229,7 @@ fn find_cli(candidates: &[&str]) -> String {
     for c in candidates {
         let cmd = build_cli_command(c, &["--version"]);
         if run_with_timeout(cmd, CLI_QUERY_TIMEOUT, Duration::from_millis(100), false)
-            .map_or(false, |o| o.success)
+            .is_some_and(|o| o.success)
         {
             return (*c).to_string();
         }
@@ -895,7 +895,7 @@ fn poll_codex() -> Result<(UsageData, Option<usize>), PollError> {
 }
 
 /// Fields can be either absent or explicit `null`; both must be survived.
-fn non_null<'a>(v: Option<&'a serde_json::Value>) -> Option<&'a serde_json::Value> {
+fn non_null(v: Option<&serde_json::Value>) -> Option<&serde_json::Value> {
     v.filter(|x| !x.is_null())
 }
 
@@ -932,8 +932,8 @@ fn parse_codex_usage(v: &serde_json::Value) -> (UsageData, Option<usize>) {
             // Primary maps to 5h and secondary to 7d unless primary is longer
             // than 24 hours while secondary is not; unknown lengths keep the
             // historic primary/secondary order.
-            let p_long = p.window_seconds.map_or(false, |x| x > 86400);
-            let s_long = s.window_seconds.map_or(false, |x| x > 86400);
+            let p_long = p.window_seconds.is_some_and(|x| x > 86400);
+            let s_long = s.window_seconds.is_some_and(|x| x > 86400);
             let (five, seven) = if p_long && !s_long { (s, p) } else { (p, s) };
             UsageData {
                 session: five,
@@ -1211,7 +1211,7 @@ fn remaining_fraction_to_percent(fraction: f64) -> f64 {
 
 fn contains_gemini(v: Option<&serde_json::Value>) -> bool {
     v.and_then(|x| x.as_str())
-        .map_or(false, |s| s.to_ascii_lowercase().contains("gemini"))
+        .is_some_and(|s| s.to_ascii_lowercase().contains("gemini"))
 }
 
 fn is_gemini_group(group: &serde_json::Value) -> bool {
@@ -1221,11 +1221,11 @@ fn is_gemini_group(group: &serde_json::Value) -> bool {
     group
         .get("buckets")
         .and_then(|b| b.as_array())
-        .map_or(false, |buckets| {
+        .is_some_and(|buckets| {
             buckets.iter().any(|b| {
                 b.get("bucketId")
                     .and_then(|id| id.as_str())
-                    .map_or(false, |id| id.to_ascii_lowercase().starts_with("gemini-"))
+                    .is_some_and(|id| id.to_ascii_lowercase().starts_with("gemini-"))
                     || contains_gemini(b.get("displayName"))
             })
         })

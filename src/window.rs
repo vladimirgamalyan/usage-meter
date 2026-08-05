@@ -1592,6 +1592,15 @@ unsafe fn draw_text_in(
     DrawTextW(hdc, &mut wide, &mut rect, format);
 }
 
+/// The brushes one bar is painted with; the accent is per provider block, the
+/// other two are shared by the whole window.
+#[derive(Clone, Copy)]
+struct BarBrushes {
+    accent: windows::Win32::Graphics::Gdi::HBRUSH,
+    track: windows::Win32::Graphics::Gdi::HBRUSH,
+    marker: windows::Win32::Graphics::Gdi::HBRUSH,
+}
+
 /// Draw one fill bar: a single pill-shaped track, slimmer than the row and
 /// vertically centered in it, filled from the left. The fill is floored to
 /// whole pixels and skipped at zero. GDI regions exclude the right/bottom
@@ -1608,10 +1617,13 @@ unsafe fn draw_bar(
     row_y: i32,
     percent: f64,
     elapsed: Option<f64>,
-    accent: windows::Win32::Graphics::Gdi::HBRUSH,
-    track: windows::Win32::Graphics::Gdi::HBRUSH,
-    marker: windows::Win32::Graphics::Gdi::HBRUSH,
+    brushes: BarBrushes,
 ) {
+    let BarBrushes {
+        accent,
+        track,
+        marker,
+    } = brushes;
     let y = row_y + (m.row_h - m.bar_h) / 2;
     // The rounding ellipse equals the bar height: fully rounded ends.
     let region = CreateRoundRectRgn(x, y, x + m.bar_w + 1, y + m.bar_h + 1, m.bar_h, m.bar_h);
@@ -1711,6 +1723,11 @@ unsafe fn on_paint(hwnd: HWND) {
             y += m.row_h + m.heading_gap;
         }
         let accent_brush = CreateSolidBrush(block.accent);
+        let brushes = BarBrushes {
+            accent: accent_brush,
+            track: track_brush,
+            marker: marker_brush,
+        };
         for (row_index, row) in block.rows.iter().enumerate() {
             if row_index > 0 {
                 y += m.row_gap;
@@ -1728,17 +1745,7 @@ unsafe fn on_paint(hwnd: HWND) {
                 true,
             );
             if row.has_bar {
-                draw_bar(
-                    mem,
-                    &m,
-                    bar_x,
-                    y,
-                    row.percent,
-                    row.elapsed,
-                    accent_brush,
-                    track_brush,
-                    marker_brush,
-                );
+                draw_bar(mem, &m, bar_x, y, row.percent, row.elapsed, brushes);
             }
             // Reset-credit lines align their text with the percent column.
             draw_text_in(
@@ -1829,7 +1836,7 @@ extern "system" fn wnd_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LP
             LRESULT(0)
         }
         WM_COMMAND => {
-            on_command(hwnd, (wparam.0 & 0xFFFF) as usize);
+            on_command(hwnd, wparam.0 & 0xFFFF);
             LRESULT(0)
         }
         WM_SYSCOMMAND => {
