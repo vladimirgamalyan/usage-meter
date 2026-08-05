@@ -1,7 +1,7 @@
 //! Window, painting, menus, timers, application state and settings.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -31,8 +31,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IDC_ARROW, MB_ICONWARNING, MB_OK, MF_BYPOSITION, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
     MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, TPM_RIGHTBUTTON,
     WINDOW_EX_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_MOVE, WM_PAINT, WM_SETICON, WM_SETTINGCHANGE, WM_SYSCOMMAND, WM_TIMER,
-    WNDCLASSW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_MOVE, WM_PAINT, WM_SETICON,
+    WM_SETTINGCHANGE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_SYSMENU,
 };
 
 use crate::diagnose;
@@ -244,6 +245,11 @@ impl AppState {
 
 static STATE: Mutex<Option<AppState>> = Mutex::new(None);
 static DPI: AtomicU32 = AtomicU32::new(96);
+/// Dragging the title bar runs a modal move loop that keeps re-applying the
+/// size the window had when the drag started, so a resize issued meanwhile is
+/// undone. Resizes are deferred to the end of the loop instead.
+static IN_MOVE_LOOP: AtomicBool = AtomicBool::new(false);
+static RESIZE_DEFERRED: AtomicBool = AtomicBool::new(false);
 
 /// Seed the DPI cache with the system DPI before the window exists.
 pub fn set_initial_dpi(dpi: u32) {
@@ -634,6 +640,10 @@ fn desired_window_size(dpi: u32) -> (i32, i32) {
 /// area it is pulled up/left, but never moved when the user has deliberately
 /// dragged it past the top or left edge.
 fn resize_window_to_content(hwnd: HWND) {
+    if IN_MOVE_LOOP.load(Ordering::Relaxed) {
+        RESIZE_DEFERRED.store(true, Ordering::Relaxed);
+        return;
+    }
     let dpi = refresh_dpi(hwnd);
     let (new_w, new_h) = desired_window_size(dpi);
     unsafe {
@@ -1743,6 +1753,20 @@ extern "system" fn wnd_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LP
             } else {
                 unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
             }
+        }
+        WM_ENTERSIZEMOVE => {
+            IN_MOVE_LOOP.store(true, Ordering::Relaxed);
+            LRESULT(0)
+        }
+        WM_EXITSIZEMOVE => {
+            IN_MOVE_LOOP.store(false, Ordering::Relaxed);
+            if RESIZE_DEFERRED.swap(false, Ordering::Relaxed) {
+                resize_window_to_content(hwnd);
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+            }
+            LRESULT(0)
         }
         WM_MOVE => {
             // A minimized window reports meaningless coordinates.
