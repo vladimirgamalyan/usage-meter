@@ -11,6 +11,9 @@ used up, for three providers at once:
 
 Each value is rendered as a slim rounded fill bar with a text like
 `42% · 2h11m` — the consumed share and a live countdown to the window reset.
+A small pointer under the bar marks how much of the window has already elapsed
+(with one hour left of a five-hour window it sits at 80%), so you can see at a
+glance whether you are burning the limit faster than the clock runs it down.
 
 ```
 Usage Meter                        ─ ×

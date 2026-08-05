@@ -8,6 +8,10 @@ pub struct UsageSection {
     /// Consumed share in percent (0..100), not the remainder.
     pub percentage: f64,
     pub resets_at: Option<SystemTime>,
+    /// Length of the window in seconds. Together with `resets_at` it yields the
+    /// share of the window that has already elapsed; `None` when the provider
+    /// does not say how long the window is.
+    pub window_seconds: Option<u64>,
 }
 
 impl UsageSection {

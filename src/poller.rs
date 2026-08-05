@@ -323,6 +323,22 @@ pub fn format_countdown(until: SystemTime, now: SystemTime) -> String {
     }
 }
 
+/// Window lengths providers name instead of stating (`five_hour`, `weekly`).
+const FIVE_HOUR_SECONDS: u64 = 5 * 3600;
+const SEVEN_DAY_SECONDS: u64 = 7 * 86400;
+
+/// Share of the window that has already elapsed, in percent (0..100): with one
+/// hour left of a five-hour window this is 80. `None` when the reset time or
+/// the window length is unknown.
+pub fn elapsed_percent(section: &UsageSection, now: SystemTime) -> Option<f64> {
+    let resets_at = section.resets_at?;
+    let window = section.window_seconds.filter(|w| *w > 0)? as f64;
+    let remaining = resets_at
+        .duration_since(now)
+        .map_or(0.0, |d| d.as_secs_f64());
+    Some(((1.0 - remaining / window) * 100.0).clamp(0.0, 100.0))
+}
+
 /// Usage line: `42% · 2h11m`; percent only when there is no reset time;
 /// `--` for a window the provider does not report.
 pub fn format_usage_text(section: &UsageSection, now: SystemTime) -> String {
@@ -625,7 +641,7 @@ fn fetch_claude_usage(token: &str) -> Result<(UsageData, Vec<ScopedLimit>), Poll
 }
 
 fn parse_claude_usage_value(v: &serde_json::Value) -> Option<(UsageData, Vec<ScopedLimit>)> {
-    let section = |name: &str| -> Option<UsageSection> {
+    let section = |name: &str, window_seconds: u64| -> Option<UsageSection> {
         let s = v.get(name)?;
         Some(UsageSection {
             // `utilization` here is already in percent, taken as is.
@@ -634,10 +650,11 @@ fn parse_claude_usage_value(v: &serde_json::Value) -> Option<(UsageData, Vec<Sco
                 .get("resets_at")
                 .and_then(|r| r.as_str())
                 .and_then(parse_iso8601),
+            window_seconds: Some(window_seconds),
         })
     };
-    let five = section("five_hour");
-    let seven = section("seven_day");
+    let five = section("five_hour", FIVE_HOUR_SECONDS);
+    let seven = section("seven_day", SEVEN_DAY_SECONDS);
     if five.is_none() && seven.is_none() {
         return None;
     }
@@ -680,6 +697,8 @@ fn parse_claude_scoped_limits(v: &serde_json::Value) -> Vec<ScopedLimit> {
                         .get("resets_at")
                         .and_then(|r| r.as_str())
                         .and_then(parse_iso8601),
+                    // Only `weekly_scoped` entries reach this point.
+                    window_seconds: Some(SEVEN_DAY_SECONDS),
                 },
             })
         })
@@ -769,10 +788,12 @@ fn parse_claude_ratelimit_headers(resp: &http::Response) -> UsageData {
         session: UsageSection {
             percentage: five_pct.unwrap_or(0.0),
             resets_at: five_reset,
+            window_seconds: Some(FIVE_HOUR_SECONDS),
         },
         weekly: UsageSection {
             percentage: seven_pct.unwrap_or(0.0),
             resets_at: seven_reset,
+            window_seconds: Some(SEVEN_DAY_SECONDS),
         },
     }
 }
@@ -873,27 +894,21 @@ fn poll_codex() -> Result<(UsageData, Option<usize>), PollError> {
     Ok(parse_codex_usage(&v))
 }
 
-struct CodexWindow {
-    section: UsageSection,
-    window_seconds: Option<u64>,
-}
-
 /// Fields can be either absent or explicit `null`; both must be survived.
 fn non_null<'a>(v: Option<&'a serde_json::Value>) -> Option<&'a serde_json::Value> {
     v.filter(|x| !x.is_null())
 }
 
-fn parse_codex_window(v: &serde_json::Value) -> Option<CodexWindow> {
+fn parse_codex_window(v: &serde_json::Value) -> Option<UsageSection> {
     let used = v.get("used_percent")?.as_f64()?;
-    Some(CodexWindow {
-        section: UsageSection {
-            percentage: used,
-            // `reset_at` is Unix seconds (Claude's expiresAt is milliseconds).
-            resets_at: v
-                .get("reset_at")
-                .and_then(|r| r.as_u64())
-                .map(unix_secs_to_system_time),
-        },
+    Some(UsageSection {
+        percentage: used,
+        // `reset_at` is Unix seconds (Claude's expiresAt is milliseconds).
+        resets_at: v
+            .get("reset_at")
+            .and_then(|r| r.as_u64())
+            .map(unix_secs_to_system_time),
+        // Codex is the one provider that states the window length itself.
         window_seconds: v.get("limit_window_seconds").and_then(|s| s.as_u64()),
     })
 }
@@ -921,8 +936,8 @@ fn parse_codex_usage(v: &serde_json::Value) -> (UsageData, Option<usize>) {
             let s_long = s.window_seconds.map_or(false, |x| x > 86400);
             let (five, seven) = if p_long && !s_long { (s, p) } else { (p, s) };
             UsageData {
-                session: five.section,
-                weekly: seven.section,
+                session: five,
+                weekly: seven,
             }
         }
         // Exactly one window always lands on the 7d row, regardless of its
@@ -930,7 +945,7 @@ fn parse_codex_usage(v: &serde_json::Value) -> (UsageData, Option<usize>) {
         // drops the 5-hour limit.
         (Some(w), None) | (None, Some(w)) => UsageData {
             session: UsageSection::default(),
-            weekly: w.section,
+            weekly: w,
         },
         (None, None) => UsageData::default(),
     };
@@ -1227,17 +1242,18 @@ fn antigravity_group_usage(group: &serde_json::Value) -> Option<UsageData> {
         let Some(fraction) = bucket.get("remainingFraction").and_then(|f| f.as_f64()) else {
             continue;
         };
-        let section = UsageSection {
+        let section = |window_seconds: u64| UsageSection {
             percentage: remaining_fraction_to_percent(fraction),
             resets_at: bucket
                 .get("resetTime")
                 .and_then(|t| t.as_str())
                 .and_then(parse_iso8601),
+            window_seconds: Some(window_seconds),
         };
         // Window names compare case-insensitively; other windows are ignored.
         match window.to_ascii_lowercase().as_str() {
-            "5h" => session = Some(section),
-            "weekly" => weekly = Some(section),
+            "5h" => session = Some(section(FIVE_HOUR_SECONDS)),
+            "weekly" => weekly = Some(section(SEVEN_DAY_SECONDS)),
             _ => {}
         }
     }
@@ -1282,6 +1298,8 @@ fn parse_antigravity_models(v: &serde_json::Value) -> Option<UsageData> {
                 .get("resetTime")
                 .and_then(|t| t.as_str())
                 .and_then(parse_iso8601),
+            // Per-model quotas do not name their window.
+            window_seconds: None,
         };
         // The most consumed model wins; ties go to the later reset time.
         let better = match &best {
@@ -1476,15 +1494,44 @@ mod tests {
         let section = UsageSection {
             percentage: 42.0,
             resets_at: Some(at(1_000_000 + 2 * 3600 + 11 * 60)),
+            window_seconds: Some(FIVE_HOUR_SECONDS),
         };
         assert_eq!(format_usage_text(&section, now), "42% \u{00B7} 2h11m");
         let no_reset = UsageSection {
             percentage: 18.0,
             resets_at: None,
+            window_seconds: Some(FIVE_HOUR_SECONDS),
         };
         assert_eq!(format_usage_text(&no_reset, now), "18%");
         // Unsupported window renders as --, not 0%.
         assert_eq!(format_usage_text(&UsageSection::default(), now), "--");
+    }
+
+    #[test]
+    fn computes_elapsed_percent() {
+        let now = at(1_000_000);
+        let section = |resets_in: i64, window: Option<u64>| UsageSection {
+            percentage: 0.0,
+            resets_at: Some(at((1_000_000 + resets_in) as u64)),
+            window_seconds: window,
+        };
+        // One hour left of five hours: 80% of the window has passed.
+        assert_eq!(
+            elapsed_percent(&section(3600, Some(FIVE_HOUR_SECONDS)), now),
+            Some(80.0)
+        );
+        assert_eq!(
+            elapsed_percent(&section(7 * 86400, Some(SEVEN_DAY_SECONDS)), now),
+            Some(0.0)
+        );
+        // Overdue windows stay pinned to the right end.
+        assert_eq!(
+            elapsed_percent(&section(-600, Some(FIVE_HOUR_SECONDS)), now),
+            Some(100.0)
+        );
+        // Unknown window length or reset time: no marker.
+        assert_eq!(elapsed_percent(&section(3600, None), now), None);
+        assert_eq!(elapsed_percent(&UsageSection::default(), now), None);
     }
 
     #[test]
@@ -1533,6 +1580,7 @@ mod tests {
         assert_eq!(scoped[0].label, "Fable");
         assert_eq!(scoped[0].section.percentage, 17.0);
         assert!(scoped[0].section.resets_at.is_some());
+        assert_eq!(scoped[0].section.window_seconds, Some(SEVEN_DAY_SECONDS));
 
         // No limits array (older responses, other plans): no scoped rows.
         let v: serde_json::Value = serde_json::from_str(

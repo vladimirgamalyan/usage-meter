@@ -53,6 +53,9 @@ const BAR_WIDTH: i32 = 109;
 /// The fill bar is a single rounded (pill-shaped) strip, slimmer than the row
 /// and vertically centered in it.
 const BAR_HEIGHT: i32 = 7;
+/// Height of the pointer marking how much of the window has already elapsed;
+/// its base is twice as wide minus one pixel.
+const TIME_MARKER_HEIGHT: i32 = 5;
 const LABEL_WIDTH: i32 = 18;
 /// Wider label column used while a model-scoped row (e.g. Fable) is shown:
 /// model names do not fit the two-character default.
@@ -184,8 +187,11 @@ fn save_settings() {
 #[derive(Default, Clone)]
 struct ProviderView {
     pct_5h: f64,
+    /// Share of the window already elapsed; `None` hides the time marker.
+    elapsed_5h: Option<f64>,
     text_5h: String,
     pct_7d: f64,
+    elapsed_7d: Option<f64>,
     text_7d: String,
     /// Model-scoped weekly rows; only Claude reports these today.
     scoped: Vec<ScopedRowView>,
@@ -195,6 +201,7 @@ struct ProviderView {
 struct ScopedRowView {
     label: String,
     pct: f64,
+    elapsed: Option<f64>,
     text: String,
 }
 
@@ -252,8 +259,10 @@ fn state() -> std::sync::MutexGuard<'static, Option<AppState>> {
 fn placeholder_view(text: &str) -> ProviderView {
     ProviderView {
         pct_5h: 0.0,
+        elapsed_5h: None,
         text_5h: text.to_string(),
         pct_7d: 0.0,
+        elapsed_7d: None,
         text_7d: text.to_string(),
         scoped: Vec::new(),
     }
@@ -286,8 +295,10 @@ fn apply_usage_data(s: &mut AppState, data: &AppUsageData, now: SystemTime) {
         match usage {
             Some(u) => {
                 view.pct_5h = u.session.percentage;
+                view.elapsed_5h = poller::elapsed_percent(&u.session, now);
                 view.text_5h = poller::format_usage_text(&u.session, now);
                 view.pct_7d = u.weekly.percentage;
+                view.elapsed_7d = poller::elapsed_percent(&u.weekly, now);
                 view.text_7d = poller::format_usage_text(&u.weekly, now);
             }
             None => {
@@ -305,6 +316,7 @@ fn apply_usage_data(s: &mut AppState, data: &AppUsageData, now: SystemTime) {
                 .map(|l| ScopedRowView {
                     label: l.label.clone(),
                     pct: l.section.percentage,
+                    elapsed: poller::elapsed_percent(&l.section, now),
                     text: poller::format_usage_text(&l.section, now),
                 })
                 .collect();
@@ -379,6 +391,8 @@ fn palette(dark: bool) -> Palette {
 struct RenderRow {
     label: String,
     percent: f64,
+    /// Share of the window already elapsed; `None` hides the time marker.
+    elapsed: Option<f64>,
     text: String,
     has_bar: bool,
 }
@@ -425,12 +439,14 @@ fn build_render_model() -> RenderModel {
             RenderRow {
                 label: strings::LABEL_5H.to_string(),
                 percent: view.pct_5h,
+                elapsed: view.elapsed_5h,
                 text: view.text_5h.clone(),
                 has_bar: true,
             },
             RenderRow {
                 label: strings::LABEL_7D.to_string(),
                 percent: view.pct_7d,
+                elapsed: view.elapsed_7d,
                 text: view.text_7d.clone(),
                 has_bar: true,
             },
@@ -444,6 +460,7 @@ fn build_render_model() -> RenderModel {
             rows.push(RenderRow {
                 label: row.label.clone(),
                 percent: row.pct,
+                elapsed: row.elapsed,
                 text: row.text.clone(),
                 has_bar: true,
             });
@@ -461,6 +478,7 @@ fn build_render_model() -> RenderModel {
             rows.push(RenderRow {
                 label: strings::LABEL_RESET_CREDIT.to_string(),
                 percent: 0.0,
+                elapsed: None,
                 text: line.clone(),
                 has_bar: false,
             });
@@ -501,6 +519,7 @@ struct Metrics {
     row_h: i32,
     bar_w: i32,
     bar_h: i32,
+    marker_h: i32,
     label_w: i32,
     label_margin: i32,
     bar_margin: i32,
@@ -521,6 +540,7 @@ impl Metrics {
             row_h: sc(ROW_HEIGHT, dpi),
             bar_w: sc(BAR_WIDTH, dpi),
             bar_h: sc(BAR_HEIGHT, dpi),
+            marker_h: sc(TIME_MARKER_HEIGHT, dpi).max(2),
             label_w: sc(label_width, dpi),
             label_margin: sc(LABEL_RIGHT_MARGIN, dpi),
             bar_margin: sc(BAR_RIGHT_MARGIN, dpi),
@@ -1455,14 +1475,21 @@ unsafe fn draw_text_in(
 /// vertically centered in it, filled from the left. The fill is floored to
 /// whole pixels and skipped at zero. GDI regions exclude the right/bottom
 /// edge, hence the +1 when creating them.
+///
+/// `elapsed` (the share of the window that has already passed) is drawn as a
+/// small pointer right below the bar, built from one row rectangle per pixel
+/// line. It reaches into the gap under the row, which is always wider than the
+/// pointer.
 unsafe fn draw_bar(
     hdc: windows::Win32::Graphics::Gdi::HDC,
     m: &Metrics,
     x: i32,
     row_y: i32,
     percent: f64,
+    elapsed: Option<f64>,
     accent: windows::Win32::Graphics::Gdi::HBRUSH,
     track: windows::Win32::Graphics::Gdi::HBRUSH,
+    marker: windows::Win32::Graphics::Gdi::HBRUSH,
 ) {
     let y = row_y + (m.row_h - m.bar_h) / 2;
     // The rounding ellipse equals the bar height: fully rounded ends.
@@ -1479,6 +1506,21 @@ unsafe fn draw_bar(
         };
         FillRect(hdc, &rect, accent);
         SelectClipRgn(hdc, None);
+    }
+    if let Some(elapsed) = elapsed {
+        let tip_x = x + (m.bar_w as f64 * (elapsed / 100.0).clamp(0.0, 1.0)).round() as i32;
+        let top = y + m.bar_h + 1;
+        // Row i is 2i+1 pixels wide, centered on the tip: a triangle pointing
+        // up at the bar.
+        for i in 0..m.marker_h {
+            let rect = RECT {
+                left: tip_x - i,
+                top: top + i,
+                right: tip_x + i + 1,
+                bottom: top + i + 1,
+            };
+            FillRect(hdc, &rect, marker);
+        }
     }
     let _ = DeleteObject(region.into());
 }
@@ -1508,6 +1550,8 @@ unsafe fn on_paint(hwnd: HWND) {
     FillRect(mem, &client, bg_brush);
 
     let track_brush = CreateSolidBrush(pal.track);
+    // The time pointer stays neutral rather than taking the provider accent.
+    let marker_brush = CreateSolidBrush(pal.label);
     let font = create_font(dpi, FW_MEDIUM.0 as i32);
     let font_bold = create_font(dpi, FW_SEMIBOLD.0 as i32);
     let old_font = SelectObject(mem, font.into());
@@ -1563,7 +1607,17 @@ unsafe fn on_paint(hwnd: HWND) {
                 true,
             );
             if row.has_bar {
-                draw_bar(mem, &m, bar_x, y, row.percent, accent_brush, track_brush);
+                draw_bar(
+                    mem,
+                    &m,
+                    bar_x,
+                    y,
+                    row.percent,
+                    row.elapsed,
+                    accent_brush,
+                    track_brush,
+                    marker_brush,
+                );
             }
             // Reset-credit lines align their text with the percent column.
             draw_text_in(
@@ -1592,6 +1646,7 @@ unsafe fn on_paint(hwnd: HWND) {
     let _ = DeleteObject(font_bold.into());
     let _ = DeleteObject(bg_brush.into());
     let _ = DeleteObject(track_brush.into());
+    let _ = DeleteObject(marker_brush.into());
     let _ = DeleteObject(bitmap.into());
     let _ = DeleteDC(mem);
     let _ = EndPaint(hwnd, &ps);
@@ -1917,12 +1972,14 @@ fn initial_render_model(settings: &Settings) -> RenderModel {
             RenderRow {
                 label: strings::LABEL_5H.to_string(),
                 percent: 0.0,
+                elapsed: None,
                 text: String::new(),
                 has_bar: true,
             },
             RenderRow {
                 label: strings::LABEL_7D.to_string(),
                 percent: 0.0,
+                elapsed: None,
                 text: String::new(),
                 has_bar: true,
             },
