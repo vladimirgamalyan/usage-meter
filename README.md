@@ -15,7 +15,7 @@ A small pointer under the bar marks how much of the window has already elapsed
 (with one hour left of a five-hour window it sits at 80%), so you can see at a
 glance whether you are burning the limit faster than the clock runs it down.
 
-![The Usage Meter window showing Claude Code and Codex limits](docs/screenshot.jpg)
+![The Usage Meter window showing Claude Code and Codex limits](docs/screenshot.png)
 
 ## Key properties
 
