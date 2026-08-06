@@ -59,6 +59,14 @@ Usage Meter                        ─ ×
 | Codex | `%CODEX_HOME%\auth.json` or `%USERPROFILE%\.codex\auth.json` |
 | Antigravity | Windows Credential Manager, generic credential `gemini:antigravity` |
 
+## Download
+
+Prebuilt Windows binaries are on the
+[releases page](https://github.com/vladimirgamalyan/usage-meter/releases):
+grab `usage-meter-<version>-x86_64-windows.exe` and run it — there is nothing to
+install. The executable is unsigned, so SmartScreen warns about it on the first
+run.
+
 ## Build
 
 Requires Rust (edition 2021) on Windows with the MSVC toolchain.

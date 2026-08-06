@@ -1,0 +1,31 @@
+name: Release
+
+# Windows is the only target: the app is a native Win32 binary.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Name the binary after the tag
+        run: Copy-Item target/release/usage-meter.exe usage-meter-${{ github.ref_name }}-x86_64-windows.exe
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create ${{ github.ref_name }}
+          usage-meter-${{ github.ref_name }}-x86_64-windows.exe
+          --title ${{ github.ref_name }}
+          --generate-notes
