@@ -14,10 +14,10 @@ use windows::Win32::Graphics::Gdi::{
     CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
     FillRgn, GetMonitorInfoW, InvalidateRect, MonitorFromPoint, MonitorFromRect,
     MonitorFromWindow, SelectClipRgn, SelectObject, SetBkMode, SetTextColor, UpdateWindow,
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DT_LEFT, DT_NOPREFIX,
-    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_MEDIUM, FW_SEMIBOLD, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, SRCCOPY, TRANSPARENT,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_LEFT, DT_NOPREFIX,
+    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_MODERN, FIXED_PITCH, FW_MEDIUM, FW_SEMIBOLD,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Shell::ExtractIconExW;
@@ -1672,7 +1672,7 @@ fn on_command(hwnd: HWND, id: usize) {
 // --- Painting ----------------------------------------------------------------
 
 unsafe fn create_font(dpi: u32, weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
-    let face = to_wide("Segoe UI");
+    let face = to_wide("Consolas");
     CreateFontW(
         -sc(12, dpi),
         0,
@@ -1686,7 +1686,7 @@ unsafe fn create_font(dpi: u32, weight: i32) -> windows::Win32::Graphics::Gdi::H
         OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY,
-        DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
+        FIXED_PITCH.0 as u32 | FF_MODERN.0 as u32,
         PCWSTR(face.as_ptr()),
     )
 }
