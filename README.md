@@ -74,9 +74,11 @@ SChannel via `native-tls`; no root certificates are bundled.
 
 ## Usage
 
-Run `usage-meter.exe`. The **Settings** menu sits in the window menu — click
-the title-bar icon, right-click the caption or press Alt+Space — and is also
-available as a right-click context menu over the window itself. It provides:
+Run `usage-meter.exe`. Drag the window with the left mouse button from anywhere
+on it, not only by the title bar. The **Settings** menu sits in the window menu
+— click the title-bar icon, right-click the caption or press Alt+Space — and is
+also available as a right-click context menu over the window itself. It
+provides:
 
 - **Refresh** — poll immediately.
 - **Update Frequency** — 5 minutes to 1 hour (default 15 minutes).

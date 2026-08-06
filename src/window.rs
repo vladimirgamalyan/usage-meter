@@ -29,11 +29,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
     TrackPopupMenu, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HICON, HMENU, ICON_BIG, ICON_SMALL,
     IDC_ARROW, MB_ICONWARNING, MB_OK, MF_BYPOSITION, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, TPM_RIGHTBUTTON,
-    WINDOW_EX_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_MOVE, WM_PAINT, WM_SETICON,
-    WM_SETTINGCHANGE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_MINIMIZEBOX,
-    WS_OVERLAPPED, WS_SYSMENU,
+    HTCAPTION, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW,
+    TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_LBUTTONDOWN,
+    WM_MOVE, WM_NCLBUTTONDOWN, WM_PAINT, WM_SETICON, WM_SETTINGCHANGE, WM_SYSCOMMAND, WM_TIMER,
+    WNDCLASSW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
 };
 
 use crate::diagnose;
@@ -2024,6 +2024,19 @@ extern "system" fn wnd_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LP
             } else {
                 unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
             }
+        }
+        WM_LBUTTONDOWN => {
+            // The window has no controls of its own, so a press anywhere on it
+            // starts the caption move loop and drags the window.
+            unsafe {
+                SendMessageW(
+                    hwnd,
+                    WM_NCLBUTTONDOWN,
+                    Some(WPARAM(HTCAPTION as usize)),
+                    Some(LPARAM(0)),
+                );
+            }
+            LRESULT(0)
         }
         WM_CONTEXTMENU => {
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
