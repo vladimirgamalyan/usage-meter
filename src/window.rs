@@ -458,9 +458,15 @@ struct Palette {
     accent_claude: COLORREF,
     accent_codex: COLORREF,
     accent_antigravity: COLORREF,
-    value_claude: COLORREF,
-    value_codex: COLORREF,
-    value_antigravity: COLORREF,
+    /// Numbers and countdowns, the same for every provider: the colored bars
+    /// already tell the blocks apart, and the readings stay easiest to read in
+    /// plain text color.
+    value: COLORREF,
+    /// Block headings carry the provider's own color, darkened from the accent
+    /// so it holds up as text. Codex has none of its own: its heading is drawn
+    /// in the plain text color.
+    heading_claude: COLORREF,
+    heading_antigravity: COLORREF,
 }
 
 fn palette(dark: bool) -> Palette {
@@ -472,9 +478,9 @@ fn palette(dark: bool) -> Palette {
             accent_claude: rgb(0xD9, 0x77, 0x57),
             accent_codex: rgb(0xF5, 0xF5, 0xF5),
             accent_antigravity: rgb(0x42, 0x85, 0xF4),
-            value_claude: rgb(0xF0, 0x9A, 0x7A),
-            value_codex: rgb(0xF5, 0xF5, 0xF5),
-            value_antigravity: rgb(0x8A, 0xB4, 0xF8),
+            value: rgb(0xF5, 0xF5, 0xF5),
+            heading_claude: rgb(0xF0, 0x9A, 0x7A),
+            heading_antigravity: rgb(0x8A, 0xB4, 0xF8),
         }
     } else {
         Palette {
@@ -484,9 +490,9 @@ fn palette(dark: bool) -> Palette {
             accent_claude: rgb(0xD9, 0x77, 0x57),
             accent_codex: rgb(0x1F, 0x1F, 0x1F),
             accent_antigravity: rgb(0x42, 0x85, 0xF4),
-            value_claude: rgb(0xA9, 0x4F, 0x32),
-            value_codex: rgb(0x1F, 0x1F, 0x1F),
-            value_antigravity: rgb(0x19, 0x67, 0xD2),
+            value: rgb(0x1F, 0x1F, 0x1F),
+            heading_claude: rgb(0xA9, 0x4F, 0x32),
+            heading_antigravity: rgb(0x19, 0x67, 0xD2),
         }
     }
 }
@@ -521,6 +527,8 @@ struct RenderRow {
 struct RenderBlock {
     title: &'static str,
     accent: COLORREF,
+    /// The block heading, drawn in the provider's color.
+    heading_color: COLORREF,
     value_color: COLORREF,
     /// Row labels and the elapsed-time pointer; faded along with the rest of
     /// the block while its data is stale.
@@ -587,8 +595,8 @@ fn build_render_model() -> RenderModel {
             color
         }
     };
-    // With a single provider the window title already names it: values are
-    // drawn in a neutral color and block headings are skipped entirely.
+    // With a single provider the window title already names it, so block
+    // headings are skipped entirely and their color never comes up.
     if s.show_claude {
         let mut rows = usage_rows(&s.claude);
         for row in &s.claude.scoped {
@@ -604,10 +612,8 @@ fn build_render_model() -> RenderModel {
         blocks.push(RenderBlock {
             title: strings::PROVIDER_CLAUDE_CODE,
             accent: shade(pal.accent_claude, stale),
-            value_color: shade(
-                if multi { pal.value_claude } else { pal.value_codex },
-                stale,
-            ),
+            heading_color: shade(pal.heading_claude, stale),
+            value_color: shade(pal.value, stale),
             label_color: shade(pal.label, stale),
             rows,
         });
@@ -627,7 +633,8 @@ fn build_render_model() -> RenderModel {
         blocks.push(RenderBlock {
             title: strings::PROVIDER_CODEX,
             accent: shade(pal.accent_codex, stale),
-            value_color: shade(pal.value_codex, stale),
+            heading_color: shade(pal.value, stale),
+            value_color: shade(pal.value, stale),
             label_color: shade(pal.label, stale),
             rows,
         });
@@ -637,14 +644,8 @@ fn build_render_model() -> RenderModel {
         blocks.push(RenderBlock {
             title: strings::PROVIDER_ANTIGRAVITY,
             accent: shade(pal.accent_antigravity, stale),
-            value_color: shade(
-                if multi {
-                    pal.value_antigravity
-                } else {
-                    pal.value_codex
-                },
-                stale,
-            ),
+            heading_color: shade(pal.heading_antigravity, stale),
+            value_color: shade(pal.value, stale),
             label_color: shade(pal.label, stale),
             rows: usage_rows(&s.antigravity),
         });
@@ -1975,7 +1976,7 @@ unsafe fn on_paint(hwnd: HWND) {
                     right: content_x + content_w - 2 * m.pad_x,
                     bottom: y + m.row_h,
                 },
-                block.value_color,
+                block.heading_color,
                 false,
             );
             SelectObject(mem, font.into());
@@ -2443,7 +2444,8 @@ fn initial_render_model(settings: &Settings) -> RenderModel {
             blocks.push(RenderBlock {
                 title: "",
                 accent: pal.accent_claude,
-                value_color: pal.value_claude,
+                heading_color: pal.heading_claude,
+                value_color: pal.value,
                 label_color: pal.label,
                 rows: empty_rows(),
             });
