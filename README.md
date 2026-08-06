@@ -34,6 +34,7 @@ glance whether you are burning the limit faster than the clock runs it down.
 - Live countdowns that tick without extra network requests; expired Codex
   reset credits disappear on their own.
 - Providers are toggled from the menu; the window resizes to fit.
+- Optional always-on-top mode, off by default.
 - Auth errors pause polling and watch the credential stores (file, WSL,
   Credential Manager); polling resumes automatically after you sign in again.
 - Transient network errors retry with exponential backoff.
@@ -89,6 +90,7 @@ provides:
 - **Models** — which providers to show (at least one is always enabled).
 - **Show Percentage** — on by default; turning it off leaves only the reset
   countdown next to each fill bar, so usage is read from the bars alone.
+- **Always on Top** — off by default; keeps the window above other windows.
 
 Settings are stored in `%APPDATA%\UsageMeter\settings.json`.
 

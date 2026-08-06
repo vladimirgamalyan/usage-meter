@@ -29,11 +29,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
     TrackPopupMenu, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HICON, HMENU, ICON_BIG, ICON_SMALL,
     IDC_ARROW, MB_ICONWARNING, MB_OK, MF_BYPOSITION, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    HTCAPTION, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW,
+    HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
     TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
     WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_LBUTTONDOWN,
     WM_MOVE, WM_NCLBUTTONDOWN, WM_PAINT, WM_POWERBROADCAST, WM_SETICON, WM_SETTINGCHANGE,
-    WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_MINIMIZEBOX, WS_OVERLAPPED,
+    WS_SYSMENU,
 };
 
 use crate::diagnose;
@@ -88,6 +90,7 @@ const ID_STEP: usize = 0x10;
 const ID_REFRESH: usize = 0x10;
 const ID_EXIT: usize = 0x20;
 const ID_SHOW_PERCENT: usize = 0x30;
+const ID_ALWAYS_ON_TOP: usize = 0x40;
 const ID_POLL_INTERVAL_BASE: usize = 0x100; // 0x100..0x130
 const ID_RESET_INTERVAL_BASE: usize = 0x200; // 0x200..0x230
 const ID_PROVIDER_BASE: usize = 0x300; // 0x300..0x320
@@ -137,6 +140,7 @@ struct Settings {
     show_codex: bool,
     show_antigravity: bool,
     show_percent: bool,
+    always_on_top: bool,
 }
 
 impl Default for Settings {
@@ -150,6 +154,7 @@ impl Default for Settings {
             show_codex: false,
             show_antigravity: false,
             show_percent: true,
+            always_on_top: false,
         }
     }
 }
@@ -196,6 +201,7 @@ fn save_settings() {
             show_codex: s.show_codex,
             show_antigravity: s.show_antigravity,
             show_percent: s.show_percent,
+            always_on_top: s.always_on_top,
         }
     };
     let Some(path) = settings_path() else { return };
@@ -259,6 +265,8 @@ struct AppState {
     /// Whether the usage percentage is printed next to the countdown; off
     /// leaves the fill bars as the only reading of how much has been used.
     show_percent: bool,
+    /// Whether the window keeps itself above other windows.
+    always_on_top: bool,
     last_data: Option<AppUsageData>,
     last_reset_credits: Option<CodexResetCredits>,
     last_reset_count: Option<usize>,
@@ -1017,6 +1025,12 @@ unsafe fn build_settings_popup() -> Option<HMENU> {
         strings::MENU_SHOW_PERCENT,
         s.show_percent,
     );
+    append_string(
+        menu,
+        ID_ALWAYS_ON_TOP,
+        strings::MENU_ALWAYS_ON_TOP,
+        s.always_on_top,
+    );
 
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     append_string(menu, ID_EXIT, strings::MENU_EXIT, false);
@@ -1741,10 +1755,33 @@ fn on_show_percent_toggled(hwnd: HWND) {
     }
 }
 
+fn on_always_on_top_toggled(hwnd: HWND) {
+    let on = {
+        let mut guard = state();
+        let Some(s) = guard.as_mut() else { return };
+        s.always_on_top = !s.always_on_top;
+        s.always_on_top
+    };
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(if on { HWND_TOPMOST } else { HWND_NOTOPMOST }),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+    save_settings();
+    rebuild_window_menu(hwnd);
+}
+
 fn on_command(hwnd: HWND, id: usize) {
     match id {
         ID_REFRESH => on_refresh(hwnd),
         ID_SHOW_PERCENT => on_show_percent_toggled(hwnd),
+        ID_ALWAYS_ON_TOP => on_always_on_top_toggled(hwnd),
         ID_EXIT => unsafe {
             let _ = DestroyWindow(hwnd);
         },
@@ -2234,7 +2271,11 @@ pub fn run() {
     ));
     let hwnd = match unsafe {
         CreateWindowExW(
-            WINDOW_EX_STYLE(0),
+            if settings.always_on_top {
+                WS_EX_TOPMOST
+            } else {
+                WINDOW_EX_STYLE(0)
+            },
             PCWSTR(class_name.as_ptr()),
             PCWSTR(title.as_ptr()),
             WINDOW_STYLE,
@@ -2269,6 +2310,7 @@ pub fn run() {
             show_codex: settings.show_codex,
             show_antigravity: settings.show_antigravity,
             show_percent: settings.show_percent,
+            always_on_top: settings.always_on_top,
             last_data: None,
             last_reset_credits: None,
             last_reset_count: None,
