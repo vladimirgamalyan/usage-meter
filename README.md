@@ -15,17 +15,7 @@ A small pointer under the bar marks how much of the window has already elapsed
 (with one hour left of a five-hour window it sits at 80%), so you can see at a
 glance whether you are burning the limit faster than the clock runs it down.
 
-```
-Usage Meter                        ─ ×
-──────────────────────────────────────
-  Claude Code
-    5h  ████░░░░░░░░░░░  42% · 2h11m
-    7d  ██░░░░░░░░░░░░░  18% · 4d2h
-  Codex
-    5h  ░░░░░░░░░░░░░░░  --
-    7d  ███████████░░░░  73% · 4d3h
-     ↺                   8d17h
-```
+![The Usage Meter window showing Claude Code and Codex limits](docs/screenshot.jpg)
 
 ## Key properties
 
