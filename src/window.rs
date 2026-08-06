@@ -64,6 +64,9 @@ const LABEL_WIDTH_WIDE: i32 = 34;
 const LABEL_RIGHT_MARGIN: i32 = 10;
 const BAR_RIGHT_MARGIN: i32 = 4;
 const TEXT_WIDTH: i32 = 86;
+/// Narrower value column used while the percentage is hidden: only the
+/// countdown is left to print.
+const TEXT_WIDTH_NO_PERCENT: i32 = 44;
 const CONTENT_PADDING_X: i32 = 16;
 const CONTENT_PADDING_Y: i32 = 14;
 const ROW_GAP: i32 = 8;
@@ -85,6 +88,7 @@ const WINDOW_STYLE: windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE =
 const ID_STEP: usize = 0x10;
 const ID_REFRESH: usize = 0x10;
 const ID_EXIT: usize = 0x20;
+const ID_SHOW_PERCENT: usize = 0x30;
 const ID_POLL_INTERVAL_BASE: usize = 0x100; // 0x100..0x130
 const ID_RESET_INTERVAL_BASE: usize = 0x200; // 0x200..0x230
 const ID_PROVIDER_BASE: usize = 0x300; // 0x300..0x320
@@ -122,6 +126,7 @@ struct Settings {
     show_claude_code: bool,
     show_codex: bool,
     show_antigravity: bool,
+    show_percent: bool,
 }
 
 impl Default for Settings {
@@ -134,6 +139,7 @@ impl Default for Settings {
             show_claude_code: true,
             show_codex: false,
             show_antigravity: false,
+            show_percent: true,
         }
     }
 }
@@ -179,6 +185,7 @@ fn save_settings() {
             show_claude_code: s.show_claude,
             show_codex: s.show_codex,
             show_antigravity: s.show_antigravity,
+            show_percent: s.show_percent,
         }
     };
     let Some(path) = settings_path() else { return };
@@ -239,6 +246,9 @@ struct AppState {
     show_claude: bool,
     show_codex: bool,
     show_antigravity: bool,
+    /// Whether the usage percentage is printed next to the countdown; off
+    /// leaves the fill bars as the only reading of how much has been used.
+    show_percent: bool,
     last_data: Option<AppUsageData>,
     last_reset_credits: Option<CodexResetCredits>,
     last_reset_count: Option<usize>,
@@ -355,15 +365,20 @@ fn set_enabled_texts(s: &mut AppState, text: &str) {
 /// Refresh texts and bars from the last successful data. Providers that are
 /// enabled but delivered nothing show `!`.
 fn apply_usage_data(s: &mut AppState, data: &AppUsageData, now: SystemTime) {
-    fn apply(view: &mut ProviderView, usage: Option<&crate::models::UsageData>, now: SystemTime) {
+    fn apply(
+        view: &mut ProviderView,
+        usage: Option<&crate::models::UsageData>,
+        now: SystemTime,
+        show_percent: bool,
+    ) {
         match usage {
             Some(u) => {
                 view.pct_5h = u.session.percentage;
                 view.elapsed_5h = poller::elapsed_percent(&u.session, now);
-                view.text_5h = poller::format_usage_text(&u.session, now);
+                view.text_5h = poller::format_usage_text(&u.session, now, show_percent);
                 view.pct_7d = u.weekly.percentage;
                 view.elapsed_7d = poller::elapsed_percent(&u.weekly, now);
-                view.text_7d = poller::format_usage_text(&u.weekly, now);
+                view.text_7d = poller::format_usage_text(&u.weekly, now, show_percent);
             }
             None => {
                 view.text_5h = strings::PLACEHOLDER_ERROR.to_string();
@@ -372,7 +387,7 @@ fn apply_usage_data(s: &mut AppState, data: &AppUsageData, now: SystemTime) {
         }
     }
     if s.show_claude {
-        apply(&mut s.claude, data.claude_code.as_ref(), now);
+        apply(&mut s.claude, data.claude_code.as_ref(), now, s.show_percent);
         if data.claude_code.is_some() {
             s.claude.scoped = data
                 .claude_scoped
@@ -381,7 +396,7 @@ fn apply_usage_data(s: &mut AppState, data: &AppUsageData, now: SystemTime) {
                     label: l.label.clone(),
                     pct: l.section.percentage,
                     elapsed: poller::elapsed_percent(&l.section, now),
-                    text: poller::format_usage_text(&l.section, now),
+                    text: poller::format_usage_text(&l.section, now, s.show_percent),
                 })
                 .collect();
         } else {
@@ -393,10 +408,15 @@ fn apply_usage_data(s: &mut AppState, data: &AppUsageData, now: SystemTime) {
         }
     }
     if s.show_codex {
-        apply(&mut s.codex, data.codex.as_ref(), now);
+        apply(&mut s.codex, data.codex.as_ref(), now, s.show_percent);
     }
     if s.show_antigravity {
-        apply(&mut s.antigravity, data.antigravity.as_ref(), now);
+        apply(
+            &mut s.antigravity,
+            data.antigravity.as_ref(),
+            now,
+            s.show_percent,
+        );
     }
     s.texts_from_data = true;
 }
@@ -490,6 +510,7 @@ struct RenderBlock {
 struct RenderModel {
     blocks: Vec<RenderBlock>,
     show_headings: bool,
+    show_percent: bool,
     dark: bool,
 }
 
@@ -510,6 +531,7 @@ fn build_render_model() -> RenderModel {
         return RenderModel {
             blocks: Vec::new(),
             show_headings: false,
+            show_percent: true,
             dark: true,
         };
     };
@@ -608,6 +630,7 @@ fn build_render_model() -> RenderModel {
     RenderModel {
         blocks,
         show_headings: multi,
+        show_percent: s.show_percent,
         dark: s.dark,
     }
 }
@@ -637,8 +660,9 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn new(dpi: u32, wide_labels: bool) -> Self {
+    fn new(dpi: u32, wide_labels: bool, show_percent: bool) -> Self {
         let label_width = if wide_labels { LABEL_WIDTH_WIDE } else { LABEL_WIDTH };
+        let text_width = if show_percent { TEXT_WIDTH } else { TEXT_WIDTH_NO_PERCENT };
         Self {
             row_h: sc(ROW_HEIGHT, dpi),
             bar_w: sc(BAR_WIDTH, dpi),
@@ -647,7 +671,7 @@ impl Metrics {
             label_w: sc(label_width, dpi),
             label_margin: sc(LABEL_RIGHT_MARGIN, dpi),
             bar_margin: sc(BAR_RIGHT_MARGIN, dpi),
-            text_w: sc(TEXT_WIDTH, dpi),
+            text_w: sc(text_width, dpi),
             pad_x: sc(CONTENT_PADDING_X, dpi),
             pad_y: sc(CONTENT_PADDING_Y, dpi),
             row_gap: sc(ROW_GAP, dpi),
@@ -727,7 +751,7 @@ fn window_size_for_client(client_w: i32, client_h: i32, dpi: u32) -> (i32, i32) 
 
 fn desired_window_size(dpi: u32) -> (i32, i32) {
     let model = build_render_model();
-    let metrics = Metrics::new(dpi, model.wide_labels());
+    let metrics = Metrics::new(dpi, model.wide_labels(), model.show_percent);
     let client_w = metrics.client_width();
     let client_h = metrics.content_height(&model);
     window_size_for_client(client_w, client_h, dpi)
@@ -975,6 +999,13 @@ unsafe fn build_settings_popup() -> Option<HMENU> {
         s.show_antigravity,
     );
     append_submenu(menu, models, strings::MENU_MODELS);
+
+    append_string(
+        menu,
+        ID_SHOW_PERCENT,
+        strings::MENU_SHOW_PERCENT,
+        s.show_percent,
+    );
 
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     append_string(menu, ID_EXIT, strings::MENU_EXIT, false);
@@ -1646,9 +1677,32 @@ fn on_provider_toggled(hwnd: HWND, index: usize) {
     }
 }
 
+fn on_show_percent_toggled(hwnd: HWND) {
+    {
+        let mut guard = state();
+        let Some(s) = guard.as_mut() else { return };
+        s.show_percent = !s.show_percent;
+        // The percentage is baked into the row texts, so they are rebuilt from
+        // the last data; placeholders carry no percentage and stay as they are.
+        if s.texts_from_data {
+            if let Some(data) = s.last_data.clone() {
+                apply_usage_data(s, &data, SystemTime::now());
+            }
+        }
+    }
+    save_settings();
+    rebuild_window_menu(hwnd);
+    // The value column narrows without the percentage.
+    resize_window_to_content(hwnd);
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
 fn on_command(hwnd: HWND, id: usize) {
     match id {
         ID_REFRESH => on_refresh(hwnd),
+        ID_SHOW_PERCENT => on_show_percent_toggled(hwnd),
         ID_EXIT => unsafe {
             let _ = DestroyWindow(hwnd);
         },
@@ -1778,7 +1832,7 @@ unsafe fn on_paint(hwnd: HWND) {
     let dpi = refresh_dpi(hwnd);
     let model = build_render_model();
     let pal = palette(model.dark);
-    let m = Metrics::new(dpi, model.wide_labels());
+    let m = Metrics::new(dpi, model.wide_labels(), model.show_percent);
 
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
@@ -2092,7 +2146,7 @@ pub fn run() {
     // per-monitor DPI right after creation.
     let dpi = current_dpi();
     let initial_model = initial_render_model(&settings);
-    let metrics = Metrics::new(dpi, initial_model.wide_labels());
+    let metrics = Metrics::new(dpi, initial_model.wide_labels(), initial_model.show_percent);
     let client_w = metrics.client_width();
     let client_h = metrics.content_height(&initial_model);
     let (win_w, win_h) = window_size_for_client(client_w, client_h, dpi);
@@ -2146,6 +2200,7 @@ pub fn run() {
             show_claude: settings.show_claude_code,
             show_codex: settings.show_codex,
             show_antigravity: settings.show_antigravity,
+            show_percent: settings.show_percent,
             last_data: None,
             last_reset_credits: None,
             last_reset_count: None,
@@ -2269,6 +2324,7 @@ fn initial_render_model(settings: &Settings) -> RenderModel {
     RenderModel {
         blocks,
         show_headings,
+        show_percent: settings.show_percent,
         dark: true,
     }
 }

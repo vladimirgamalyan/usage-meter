@@ -83,6 +83,8 @@ available as a right-click context menu over the window itself. It provides:
 - **Reset Credit Frequency** — how often the Codex reset-credit list is
   re-fetched (default 6 hours); shown only when Codex is enabled.
 - **Models** — which providers to show (at least one is always enabled).
+- **Show Percentage** — on by default; turning it off leaves only the reset
+  countdown next to each fill bar, so usage is read from the bars alone.
 
 Settings are stored in `%APPDATA%\UsageMeter\settings.json`.
 

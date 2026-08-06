@@ -343,13 +343,20 @@ pub fn elapsed_percent(section: &UsageSection, now: SystemTime) -> Option<f64> {
 
 /// Usage line: `42% · 2h11m`; percent only when there is no reset time;
 /// `--` for a window the provider does not report.
-pub fn format_usage_text(section: &UsageSection, now: SystemTime) -> String {
+/// With `show_percent` off only the countdown remains, leaving the fill bar as
+/// the sole indication of how much has been used. A window without a reset time
+/// then has nothing left to print.
+pub fn format_usage_text(section: &UsageSection, now: SystemTime, show_percent: bool) -> String {
     if section.is_unsupported() {
         return strings::PLACEHOLDER_NONE.to_string();
     }
+    let countdown = section.resets_at.map(|t| format_countdown(t, now));
+    if !show_percent {
+        return countdown.unwrap_or_default();
+    }
     let pct = format!("{:.0}%", section.percentage);
-    match section.resets_at {
-        Some(t) => format!("{pct} \u{00B7} {}", format_countdown(t, now)),
+    match countdown {
+        Some(c) => format!("{pct} \u{00B7} {c}"),
         None => pct,
     }
 }
@@ -1561,15 +1568,34 @@ mod tests {
             resets_at: Some(at(1_000_000 + 2 * 3600 + 11 * 60)),
             window_seconds: Some(FIVE_HOUR_SECONDS),
         };
-        assert_eq!(format_usage_text(&section, now), "42% \u{00B7} 2h11m");
+        assert_eq!(format_usage_text(&section, now, true), "42% \u{00B7} 2h11m");
         let no_reset = UsageSection {
             percentage: 18.0,
             resets_at: None,
             window_seconds: Some(FIVE_HOUR_SECONDS),
         };
-        assert_eq!(format_usage_text(&no_reset, now), "18%");
+        assert_eq!(format_usage_text(&no_reset, now, true), "18%");
         // Unsupported window renders as --, not 0%.
-        assert_eq!(format_usage_text(&UsageSection::default(), now), "--");
+        assert_eq!(format_usage_text(&UsageSection::default(), now, true), "--");
+    }
+
+    #[test]
+    fn formats_usage_text_without_percent() {
+        let now = at(1_000_000);
+        let section = UsageSection {
+            percentage: 42.0,
+            resets_at: Some(at(1_000_000 + 2 * 3600 + 11 * 60)),
+            window_seconds: Some(FIVE_HOUR_SECONDS),
+        };
+        assert_eq!(format_usage_text(&section, now, false), "2h11m");
+        // Without a reset time the row falls back to its bar alone.
+        let no_reset = UsageSection {
+            percentage: 18.0,
+            resets_at: None,
+            window_seconds: Some(FIVE_HOUR_SECONDS),
+        };
+        assert_eq!(format_usage_text(&no_reset, now, false), "");
+        assert_eq!(format_usage_text(&UsageSection::default(), now, false), "--");
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub const MENU_REFRESH: &str = "Refresh";
 pub const MENU_UPDATE_FREQUENCY: &str = "Update Frequency";
 pub const MENU_RESET_CREDIT_FREQUENCY: &str = "Reset Credit Frequency";
 pub const MENU_MODELS: &str = "Models";
+pub const MENU_SHOW_PERCENT: &str = "Show Percentage";
 pub const MENU_EXIT: &str = "Exit";
 
 pub const MENU_5_MINUTES: &str = "5 Minutes";
