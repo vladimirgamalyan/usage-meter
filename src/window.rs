@@ -72,7 +72,6 @@ const CONTENT_PADDING_Y: i32 = 14;
 const ROW_GAP: i32 = 8;
 const HEADING_GAP: i32 = 5;
 const BLOCK_GAP: i32 = 14;
-const ROW_INDENT: i32 = 10;
 const MIN_CLIENT_WIDTH: i32 = 200;
 
 const WINDOW_STYLE: windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE =
@@ -655,7 +654,6 @@ struct Metrics {
     row_gap: i32,
     heading_gap: i32,
     block_gap: i32,
-    row_indent: i32,
     min_client_w: i32,
 }
 
@@ -677,7 +675,6 @@ impl Metrics {
             row_gap: sc(ROW_GAP, dpi),
             heading_gap: sc(HEADING_GAP, dpi),
             block_gap: sc(BLOCK_GAP, dpi),
-            row_indent: sc(ROW_INDENT, dpi),
             min_client_w: sc(MIN_CLIENT_WIDTH, dpi),
         }
     }
@@ -688,7 +685,6 @@ impl Metrics {
 
     fn content_width(&self) -> i32 {
         2 * self.pad_x
-            + self.row_indent
             + self.label_w
             + self.label_margin
             + self.bar_width()
@@ -1865,8 +1861,7 @@ unsafe fn on_paint(hwnd: HWND) {
     let origin_x = (cw - content_w) / 2;
     let mut y = (ch - content_h) / 2 + m.pad_y;
     let content_x = origin_x + m.pad_x;
-    let row_x = content_x + m.row_indent;
-    let bar_x = row_x + m.label_w + m.label_margin;
+    let bar_x = content_x + m.label_w + m.label_margin;
     let text_x = bar_x + m.bar_width() + m.bar_margin;
 
     for (block_index, block) in model.blocks.iter().enumerate() {
@@ -1875,11 +1870,13 @@ unsafe fn on_paint(hwnd: HWND) {
         }
         if model.show_headings {
             SelectObject(mem, font_bold.into());
+            // Headings start at the bar column: the label column is the only
+            // thing left of them, and the window width is set by the rows.
             draw_text_in(
                 mem,
                 block.title,
                 RECT {
-                    left: content_x,
+                    left: bar_x,
                     top: y,
                     right: content_x + content_w - 2 * m.pad_x,
                     bottom: y + m.row_h,
@@ -1907,9 +1904,9 @@ unsafe fn on_paint(hwnd: HWND) {
                 mem,
                 &row.label,
                 RECT {
-                    left: row_x,
+                    left: content_x,
                     top: y,
-                    right: row_x + m.label_w,
+                    right: content_x + m.label_w,
                     bottom: y + m.row_h,
                 },
                 block.label_color,
