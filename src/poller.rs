@@ -343,7 +343,17 @@ pub fn elapsed_percent(section: &UsageSection, now: SystemTime) -> Option<f64> {
     Some(((1.0 - remaining / window) * 100.0).clamp(0.0, 100.0))
 }
 
-/// Usage line: `42% · 2h11m`; percent only when there is no reset time;
+/// The percent is right-aligned to the width of `100`, so the separator and the
+/// countdown behind it land on the same column whatever the number: the times
+/// read straight down the window. The font is fixed-pitch, so padding with
+/// spaces is enough.
+const PERCENT_WIDTH: usize = 3;
+/// Characters a usage line spends before its countdown: the percent column, the
+/// `%` sign and the ` · ` separator. Checked against the real format by
+/// `bare_countdown_lines_up_with_usage_line`.
+const COUNTDOWN_COLUMN: usize = PERCENT_WIDTH + 4;
+
+/// Usage line: ` 42% · 2h11m`; percent only when there is no reset time;
 /// `--` for a window the provider does not report.
 /// With `show_percent` off only the countdown remains, leaving the fill bar as
 /// the sole indication of how much has been used. A window without a reset time
@@ -356,10 +366,20 @@ pub fn format_usage_text(section: &UsageSection, now: SystemTime, show_percent: 
     if !show_percent {
         return countdown.unwrap_or_default();
     }
-    let pct = format!("{:.0}%", section.percentage);
+    let pct = format!("{:>PERCENT_WIDTH$.0}%", section.percentage);
     match countdown {
         Some(c) => format!("{pct} \u{00B7} {c}"),
         None => pct,
+    }
+}
+
+/// A line that carries a countdown and nothing else (a Codex reset credit) is
+/// padded to the column where a usage line prints its own countdown.
+pub fn pad_bare_countdown(countdown: &str, show_percent: bool) -> String {
+    if show_percent {
+        format!("{:COUNTDOWN_COLUMN$}{countdown}", "")
+    } else {
+        countdown.to_string()
     }
 }
 
@@ -1579,15 +1599,45 @@ mod tests {
             resets_at: Some(at(1_000_000 + 2 * 3600 + 11 * 60)),
             window_seconds: Some(FIVE_HOUR_SECONDS),
         };
-        assert_eq!(format_usage_text(&section, now, true), "42% \u{00B7} 2h11m");
+        assert_eq!(format_usage_text(&section, now, true), " 42% \u{00B7} 2h11m");
         let no_reset = UsageSection {
             percentage: 18.0,
             resets_at: None,
             window_seconds: Some(FIVE_HOUR_SECONDS),
         };
-        assert_eq!(format_usage_text(&no_reset, now, true), "18%");
+        assert_eq!(format_usage_text(&no_reset, now, true), " 18%");
         // Unsupported window renders as --, not 0%.
         assert_eq!(format_usage_text(&UsageSection::default(), now, true), "--");
+    }
+
+    /// One and three digit percentages keep the countdown on the column two
+    /// digits put it at.
+    #[test]
+    fn pads_percent_to_a_fixed_column() {
+        let now = at(1_000_000);
+        let section = |percentage: f64| UsageSection {
+            percentage,
+            resets_at: Some(at(1_000_000 + 2 * 3600 + 11 * 60)),
+            window_seconds: Some(FIVE_HOUR_SECONDS),
+        };
+        assert_eq!(format_usage_text(&section(5.0), now, true), "  5% \u{00B7} 2h11m");
+        assert_eq!(format_usage_text(&section(100.0), now, true), "100% \u{00B7} 2h11m");
+    }
+
+    #[test]
+    fn bare_countdown_lines_up_with_usage_line() {
+        let now = at(1_000_000);
+        let section = UsageSection {
+            percentage: 5.0,
+            resets_at: Some(at(1_000_000 + 2 * 3600 + 11 * 60)),
+            window_seconds: Some(FIVE_HOUR_SECONDS),
+        };
+        let usage = format_usage_text(&section, now, true);
+        let bare = pad_bare_countdown("2h11m", true);
+        assert!(usage.ends_with("2h11m") && bare.ends_with("2h11m"));
+        assert_eq!(usage.chars().count(), bare.chars().count());
+        // Without the percent column there is nothing to line up with.
+        assert_eq!(pad_bare_countdown("2h11m", false), "2h11m");
     }
 
     #[test]

@@ -619,7 +619,7 @@ fn build_render_model() -> RenderModel {
                 label: strings::LABEL_RESET_CREDIT.to_string(),
                 percent: 0.0,
                 elapsed: None,
-                text: line.clone(),
+                text: poller::pad_bare_countdown(line, s.show_percent),
                 has_bar: false,
             });
         }
@@ -2004,7 +2004,8 @@ unsafe fn on_paint(hwnd: HWND) {
             if row.has_bar {
                 draw_bar(mem, &m, bar_x, y, row.percent, row.elapsed, brushes);
             }
-            // Reset-credit lines align their text with the percent column.
+            // The value column; a reset-credit line carries its own padding to
+            // put its countdown under the countdowns above it.
             draw_text_in(
                 mem,
                 &row.text,
