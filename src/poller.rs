@@ -9,7 +9,9 @@ use windows::Win32::System::SystemInformation::GetTickCount64;
 
 use crate::diagnose;
 use crate::http;
-use crate::models::{AppUsageData, CodexResetCredits, ScopedLimit, UsageData, UsageSection};
+use crate::models::{
+    AppUsageData, CodexResetCredit, CodexResetCredits, ScopedLimit, UsageData, UsageSection,
+};
 use crate::strings;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -373,13 +375,32 @@ pub fn format_usage_text(section: &UsageSection, now: SystemTime, show_percent: 
     }
 }
 
+/// Characters a usage line prints before its countdown; zero once the percent
+/// column is gone and the countdown starts the line.
+pub fn countdown_offset(show_percent: bool) -> usize {
+    if show_percent {
+        COUNTDOWN_COLUMN
+    } else {
+        0
+    }
+}
+
 /// A line that carries a countdown and nothing else (a Codex reset credit) is
 /// padded to the column where a usage line prints its own countdown.
 pub fn pad_bare_countdown(countdown: &str, show_percent: bool) -> String {
-    if show_percent {
-        format!("{:COUNTDOWN_COLUMN$}{countdown}", "")
-    } else {
-        countdown.to_string()
+    format!(
+        "{:width$}{countdown}",
+        "",
+        width = countdown_offset(show_percent)
+    )
+}
+
+/// Cut a label to at most `max_chars` characters, dropping whole characters so
+/// no half-drawn glyph is left at the edge.
+pub fn fit_label(label: &str, max_chars: usize) -> &str {
+    match label.char_indices().nth(max_chars) {
+        Some((byte, _)) => &label[..byte],
+        None => label,
     }
 }
 
@@ -398,25 +419,47 @@ pub fn seconds_until_text_change(until: SystemTime, now: SystemTime) -> Option<u
     })
 }
 
+/// One reset-credit row: the name the API gave the credit and its countdown.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResetLine {
+    pub label: String,
+    /// Empty for a credit with no expiration date: there is nothing to count.
+    pub countdown: String,
+}
+
 /// Codex reset-credit display lines, recomputed on every countdown tick.
 /// Expired credits are dropped here (not at parse time) so an expired line
 /// disappears on its own without a new network request. Credits without an
-/// expiry cannot be ordered and collapse into a single count line.
-pub fn build_reset_lines(credits: &CodexResetCredits, now: SystemTime) -> Vec<String> {
-    let mut dated: Vec<SystemTime> = credits
-        .expiries
+/// expiry cannot be ordered and go last, each on its own line.
+pub fn build_reset_lines(credits: &CodexResetCredits, now: SystemTime) -> Vec<ResetLine> {
+    let label = |c: &CodexResetCredit| {
+        c.title
+            .clone()
+            .unwrap_or_else(|| strings::LABEL_RESET_CREDIT.to_string())
+    };
+    let mut dated: Vec<(SystemTime, &CodexResetCredit)> = credits
+        .credits
         .iter()
-        .flatten()
-        .copied()
-        .filter(|t| *t > now)
+        .filter_map(|c| c.expires_at.filter(|t| *t > now).map(|t| (t, c)))
         .collect();
-    dated.sort();
-    let mut lines: Vec<String> = dated.into_iter().map(|t| format_countdown(t, now)).collect();
-    let undated = credits.expiries.iter().filter(|e| e.is_none()).count();
-    if undated > 0 {
-        lines.push(undated.to_string());
-    }
-    lines
+    dated.sort_by_key(|(t, _)| *t);
+    dated
+        .into_iter()
+        .map(|(t, c)| ResetLine {
+            label: label(c),
+            countdown: format_countdown(t, now),
+        })
+        .chain(
+            credits
+                .credits
+                .iter()
+                .filter(|c| c.expires_at.is_none())
+                .map(|c| ResetLine {
+                    label: label(c),
+                    countdown: String::new(),
+                }),
+        )
+        .collect()
 }
 
 // --- Claude Code -------------------------------------------------------------
@@ -1071,7 +1114,7 @@ pub fn poll_codex_reset_credits() -> Result<CodexResetCredits, PollError> {
 
 fn parse_codex_reset_credits(v: &serde_json::Value) -> CodexResetCredits {
     if let Some(credits) = v.get("credits").and_then(|c| c.as_array()) {
-        let expiries = credits
+        let credits = credits
             .iter()
             .filter(|c| {
                 let supported =
@@ -1083,17 +1126,26 @@ fn parse_codex_reset_credits(v: &serde_json::Value) -> CodexResetCredits {
                 };
                 supported && available
             })
-            .map(|c| {
-                c.get("expires_at")
+            .map(|c| CodexResetCredit {
+                // A missing, non-string or blank title leaves `None`: the
+                // generic label stands in when the line is built.
+                title: c
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(String::from),
+                expires_at: c
+                    .get("expires_at")
                     .and_then(|e| e.as_str())
-                    .and_then(parse_iso8601)
+                    .and_then(parse_iso8601),
             })
             .collect();
-        CodexResetCredits { expiries }
+        CodexResetCredits { credits }
     } else if let Some(n) = v.get("available_count").and_then(|n| n.as_u64()) {
-        // No credits array: available_count yields N entries without dates.
+        // No credits array: available_count yields N nameless, undated entries.
         CodexResetCredits {
-            expiries: vec![None; n as usize],
+            credits: vec![CodexResetCredit::default(); n as usize],
         }
     } else {
         CodexResetCredits::default()
@@ -1798,38 +1850,80 @@ mod tests {
     fn parses_codex_reset_credits() {
         let v = serde_json::json!({
             "credits": [
-                {"status": "available", "expires_at": "2036-08-12T17:25:40Z", "is_supported_by_plan": true},
+                {"status": "available", "expires_at": "2036-08-12T17:25:40Z", "is_supported_by_plan": true, "title": "Full reset"},
                 {"status": "used", "expires_at": "2036-08-12T17:25:40Z"},
-                {"expires_at": "2036-01-01T00:00:00Z"},
+                {"expires_at": "2036-01-01T00:00:00Z", "title": "  "},
                 {"status": "available", "is_supported_by_plan": false},
-                {"status": "available"}
+                {"status": "available", "title": 7}
             ],
             "available_count": 3
         });
         let credits = parse_codex_reset_credits(&v);
         // used and unsupported are filtered out; missing status counts as available.
-        assert_eq!(credits.expiries.len(), 3);
-        assert_eq!(credits.expiries.iter().filter(|e| e.is_none()).count(), 1);
+        assert_eq!(credits.credits.len(), 3);
+        assert_eq!(credits.credits[0].title.as_deref(), Some("Full reset"));
+        // Blank, non-string and missing titles all leave None.
+        assert_eq!(credits.credits[1].title, None);
+        assert_eq!(credits.credits[2].title, None);
+        assert_eq!(
+            credits
+                .credits
+                .iter()
+                .filter(|c| c.expires_at.is_none())
+                .count(),
+            1
+        );
 
-        // No credits array: available_count yields N undated entries.
+        // No credits array: available_count yields N nameless, undated entries.
         let credits = parse_codex_reset_credits(&serde_json::json!({"available_count": 2}));
-        assert_eq!(credits.expiries, vec![None, None]);
+        assert_eq!(credits.credits.len(), 2);
+        assert!(credits
+            .credits
+            .iter()
+            .all(|c| c.title.is_none() && c.expires_at.is_none()));
     }
 
     #[test]
     fn builds_reset_lines() {
         let now = at(1_000_000);
+        let credit = |title: Option<&str>, expires_at: Option<SystemTime>| CodexResetCredit {
+            title: title.map(String::from),
+            expires_at,
+        };
         let credits = CodexResetCredits {
-            expiries: vec![
-                Some(at(1_000_000 + 9 * 86400 + 5 * 3600)), // 9d5h
-                Some(at(999_000)),                          // expired: dropped
-                None,
-                None,
-                Some(at(1_000_000 + 3600)), // 1h0m, sorts first
+            credits: vec![
+                credit(Some("Full reset"), Some(at(1_000_000 + 9 * 86400 + 5 * 3600))), // 9d5h
+                credit(None, Some(at(999_000))), // expired: dropped
+                credit(Some("Gifted"), None),
+                credit(None, None),
+                credit(None, Some(at(1_000_000 + 3600))), // 1h0m, sorts first
             ],
         };
         let lines = build_reset_lines(&credits, now);
-        assert_eq!(lines, vec!["1h0m", "9d5h", "2"]);
+        let shown: Vec<(&str, &str)> = lines
+            .iter()
+            .map(|l| (l.label.as_str(), l.countdown.as_str()))
+            .collect();
+        // Dated credits sort by expiry; undated ones follow, one line each, and
+        // a credit without a title falls back to the generic label.
+        assert_eq!(
+            shown,
+            vec![
+                ("reset", "1h0m"),
+                ("Full reset", "9d5h"),
+                ("Gifted", ""),
+                ("reset", ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn fits_labels_to_whole_characters() {
+        assert_eq!(fit_label("Full reset", 22), "Full reset");
+        assert_eq!(fit_label("Weekly limit reset", 16), "Weekly limit res");
+        // Cutting counts characters, not bytes.
+        assert_eq!(fit_label("Сброс лимита", 5), "Сброс");
+        assert_eq!(fit_label("reset", 0), "");
     }
 
     #[test]

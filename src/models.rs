@@ -51,9 +51,17 @@ pub struct AppUsageData {
     pub codex_reset_credits_available: Option<usize>,
 }
 
-/// The Codex rate-limit-reset credit list. `None` expiry means the credit has
-/// no known expiration date.
+/// One Codex rate-limit-reset credit. `None` expiry means the credit has no
+/// known expiration date; `None` title means the response carried no usable
+/// name for it and the generic label is used instead.
+#[derive(Clone, Debug, Default)]
+pub struct CodexResetCredit {
+    pub title: Option<String>,
+    pub expires_at: Option<SystemTime>,
+}
+
+/// The Codex rate-limit-reset credit list.
 #[derive(Clone, Debug, Default)]
 pub struct CodexResetCredits {
-    pub expiries: Vec<Option<SystemTime>>,
+    pub credits: Vec<CodexResetCredit>,
 }

@@ -12,12 +12,12 @@ use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_D
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
     CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
-    FillRgn, GetMonitorInfoW, InvalidateRect, MonitorFromPoint, MonitorFromRect,
+    FillRgn, GetMonitorInfoW, GetTextMetricsW, InvalidateRect, MonitorFromPoint, MonitorFromRect,
     MonitorFromWindow, SelectClipRgn, SelectObject, SetBkMode, SetTextColor, UpdateWindow,
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_LEFT, DT_NOPREFIX,
     DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_MODERN, FIXED_PITCH, FW_MEDIUM, FW_SEMIBOLD,
     MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Shell::ExtractIconExW;
@@ -258,7 +258,7 @@ struct AppState {
     claude: ProviderView,
     codex: ProviderView,
     antigravity: ProviderView,
-    codex_reset_lines: Vec<String>,
+    codex_reset_lines: Vec<poller::ResetLine>,
     show_claude: bool,
     show_codex: bool,
     show_antigravity: bool,
@@ -616,10 +616,10 @@ fn build_render_model() -> RenderModel {
         let mut rows = usage_rows(&s.codex);
         for line in &s.codex_reset_lines {
             rows.push(RenderRow {
-                label: strings::LABEL_RESET_CREDIT.to_string(),
+                label: line.label.clone(),
                 percent: 0.0,
                 elapsed: None,
-                text: poller::pad_bare_countdown(line, s.show_percent),
+                text: poller::pad_bare_countdown(&line.countdown, s.show_percent),
                 has_bar: false,
             });
         }
@@ -1503,8 +1503,8 @@ fn reschedule_countdown(hwnd: HWND) {
         }
         if s.show_codex {
             if let Some(credits) = &s.last_reset_credits {
-                for expiry in credits.expiries.iter().flatten() {
-                    consider(Some(*expiry));
+                for credit in &credits.credits {
+                    consider(credit.expires_at);
                 }
             }
         }
@@ -1947,6 +1947,17 @@ unsafe fn on_paint(hwnd: HWND) {
     let bar_x = content_x + m.label_w + m.label_margin;
     let text_x = bar_x + m.bar_width() + m.bar_margin;
 
+    // A row without a bar labels the bar column, but its label may run past it:
+    // the value column starts with padding that puts the countdown under the
+    // countdowns above. The label stops one character short of that countdown,
+    // so a space always separates the two.
+    let mut tm = TEXTMETRICW::default();
+    let _ = GetTextMetricsW(mem, &mut tm);
+    let char_w = tm.tmAveCharWidth.max(1);
+    let countdown_x = text_x + poller::countdown_offset(model.show_percent) as i32 * char_w;
+    let bare_label_right = countdown_x - char_w;
+    let bare_label_chars = ((bare_label_right - bar_x) / char_w).max(0) as usize;
+
     for (block_index, block) in model.blocks.iter().enumerate() {
         if block_index > 0 {
             y += m.block_gap;
@@ -1985,22 +1996,28 @@ unsafe fn on_paint(hwnd: HWND) {
             }
             // A row without a bar has the bar column to itself and spells its
             // label out there; rows with one keep the narrow label column.
-            let label_rect = if row.has_bar {
-                RECT {
-                    left: content_x,
-                    top: y,
-                    right: content_x + m.label_w,
-                    bottom: y + m.row_h,
-                }
+            let (label, label_rect) = if row.has_bar {
+                (
+                    row.label.as_str(),
+                    RECT {
+                        left: content_x,
+                        top: y,
+                        right: content_x + m.label_w,
+                        bottom: y + m.row_h,
+                    },
+                )
             } else {
-                RECT {
-                    left: bar_x,
-                    top: y,
-                    right: bar_x + m.bar_width(),
-                    bottom: y + m.row_h,
-                }
+                (
+                    poller::fit_label(&row.label, bare_label_chars),
+                    RECT {
+                        left: bar_x,
+                        top: y,
+                        right: bare_label_right,
+                        bottom: y + m.row_h,
+                    },
+                )
             };
-            draw_text_in(mem, &row.label, label_rect, block.label_color, row.has_bar);
+            draw_text_in(mem, label, label_rect, block.label_color, row.has_bar);
             if row.has_bar {
                 draw_bar(mem, &m, bar_x, y, row.percent, row.elapsed, brushes);
             }
