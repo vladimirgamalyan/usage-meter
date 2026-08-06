@@ -32,8 +32,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HTCAPTION, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW,
     TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
     WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_LBUTTONDOWN,
-    WM_MOVE, WM_NCLBUTTONDOWN, WM_PAINT, WM_SETICON, WM_SETTINGCHANGE, WM_SYSCOMMAND, WM_TIMER,
-    WNDCLASSW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    WM_MOVE, WM_NCLBUTTONDOWN, WM_PAINT, WM_POWERBROADCAST, WM_SETICON, WM_SETTINGCHANGE,
+    WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
 };
 
 use crate::diagnose;
@@ -110,6 +110,17 @@ const DEFAULT_POLL_INTERVAL_MS: u64 = 900_000; // 15 minutes
 const DEFAULT_RESET_INTERVAL_MS: u64 = 21_600_000; // 6 hours
 const FAST_POLL_MS: u32 = 5_000;
 const RETRY_BASE_MS: u64 = 30_000;
+/// Fast poll rounds granted after a resume from sleep, about a minute at
+/// `FAST_POLL_MS`. The network is usually not back yet in the first seconds
+/// after a resume, and the regular backoff would leave the numbers as old as
+/// the sleep for half a minute.
+const RESUME_POLL_ATTEMPTS: u32 = 12;
+
+/// `PBT_APMRESUMEAUTOMATIC` and `PBT_APMRESUMESUSPEND`, which live in the
+/// `Win32_System_Power` feature the crate does not pull in. The second one
+/// arrives on top of the first when the user woke the machine themselves.
+const PBT_APMRESUMESUSPEND: usize = 0x0007;
+const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
 
 // --- Settings ----------------------------------------------------------------
 
@@ -265,6 +276,9 @@ struct AppState {
     /// Whether the fast poll timer is running, so a countdown tick can tell an
     /// expiry that has just happened from one already being polled for.
     fast_poll_active: bool,
+    /// Fast poll rounds left after a resume from sleep; zero outside the
+    /// window that follows a resume.
+    resume_polls_left: u32,
     /// One slot per endpoint: the usage poll and the Codex reset-credit list.
     poll_slot: RequestSlot,
     credits_slot: RequestSlot,
@@ -1487,19 +1501,47 @@ fn reschedule_countdown(hwnd: HWND) {
     set_timer(hwnd, TIMER_COUNTDOWN, secs * 1000);
 }
 
+/// Woken from sleep: the numbers are as old as the sleep was. Poll right away
+/// and keep the fast timer running until a round succeeds, since the first
+/// attempts after a resume usually fail on a network that is not back yet.
+fn on_resume(hwnd: HWND) {
+    {
+        let mut guard = state();
+        let Some(s) = guard.as_mut() else { return };
+        // Polling paused on an auth error watches the credential stores on the
+        // poll timer instead; there is nothing to fetch until a sign-in.
+        if s.auth_error_paused_polling {
+            return;
+        }
+        s.retry_count = 0;
+        s.resume_polls_left = RESUME_POLL_ATTEMPTS;
+    }
+    diagnose::log("resumed from sleep, polling until a round succeeds");
+    set_fast_poll(hwnd, true);
+    spawn_poll(hwnd);
+}
+
 /// React to freshly polled data: theme check, repaint, timer replanning.
 fn on_data_updated(hwnd: HWND) {
     check_theme(hwnd);
     let now = SystemTime::now();
-    let (paused, ok, retry, interval, overdue) = {
-        let guard = state();
-        let Some(s) = guard.as_ref() else { return };
+    let (paused, ok, retry, interval, overdue, resuming) = {
+        let mut guard = state();
+        let Some(s) = guard.as_mut() else { return };
+        // A successful round ends the post-resume window; a failed one spends
+        // one of its attempts.
+        if s.last_poll_ok {
+            s.resume_polls_left = 0;
+        } else {
+            s.resume_polls_left = s.resume_polls_left.saturating_sub(1);
+        }
         (
             s.auth_error_paused_polling,
             s.last_poll_ok,
             s.retry_count,
             s.poll_interval_ms,
             any_window_overdue(s, now),
+            s.resume_polls_left > 0,
         )
     };
     if paused {
@@ -1517,7 +1559,10 @@ fn on_data_updated(hwnd: HWND) {
     } else {
         // Transient failure: exponential backoff, capped at the poll interval.
         set_timer(hwnd, TIMER_POLL, retry_delay_ms(retry, interval));
-        set_fast_poll(hwnd, false);
+        // Right after a resume the failure is usually just the network still
+        // coming up, so retrying on the fast timer beats waiting out the
+        // backoff.
+        set_fast_poll(hwnd, resuming);
         // The rows keep showing the last known data, so their countdowns must
         // keep running even though the poll failed.
         reschedule_countdown(hwnd);
@@ -1998,6 +2043,12 @@ extern "system" fn wnd_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LP
             }
             LRESULT(0)
         }
+        WM_POWERBROADCAST => {
+            if wparam.0 == PBT_APMRESUMEAUTOMATIC || wparam.0 == PBT_APMRESUMESUSPEND {
+                on_resume(hwnd);
+            }
+            LRESULT(1)
+        }
         MSG_DATA_UPDATED => {
             on_data_updated(hwnd);
             LRESULT(0)
@@ -2231,6 +2282,7 @@ pub fn run() {
             last_poll_ok: false,
             texts_from_data: false,
             fast_poll_active: false,
+            resume_polls_left: 0,
             poll_slot: RequestSlot::default(),
             credits_slot: RequestSlot::default(),
             window_x: settings.window_x,

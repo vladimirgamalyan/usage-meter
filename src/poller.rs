@@ -5,6 +5,8 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use windows::Win32::System::SystemInformation::GetTickCount64;
+
 use crate::diagnose;
 use crate::http;
 use crate::models::{AppUsageData, CodexResetCredits, ScopedLimit, UsageData, UsageSection};
@@ -419,11 +421,17 @@ static ACTIVE_CLAUDE_SOURCE: Mutex<Option<ClaudeSource>> = Mutex::new(None);
 const USAGE_COOLDOWN_BASE: Duration = Duration::from_secs(10 * 60);
 const USAGE_COOLDOWN_MAX: Duration = Duration::from_secs(60 * 60);
 
-/// Consecutive 429s from the usage endpoint and the instant it may be asked
-/// again.
-static CLAUDE_USAGE_COOLDOWN: Mutex<Option<(u32, Instant)>> = Mutex::new(None);
+/// Consecutive 429s from the usage endpoint and the tick count it may be asked
+/// again at.
+static CLAUDE_USAGE_COOLDOWN: Mutex<Option<(u32, u64)>> = Mutex::new(None);
 
-fn usage_cooldown() -> std::sync::MutexGuard<'static, Option<(u32, Instant)>> {
+/// Milliseconds since boot, sleep included. `Instant` stops while the machine
+/// sleeps, which would carry a cooldown over a sleep that already outlasted it.
+fn tick_count_ms() -> u64 {
+    unsafe { GetTickCount64() }
+}
+
+fn usage_cooldown() -> std::sync::MutexGuard<'static, Option<(u32, u64)>> {
     CLAUDE_USAGE_COOLDOWN
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -440,7 +448,10 @@ fn usage_cooldown_len(consecutive: u32) -> Duration {
 /// Time left before the usage endpoint may be polled again.
 fn usage_cooldown_remaining() -> Option<Duration> {
     let (_, until) = (*usage_cooldown())?;
-    until.checked_duration_since(Instant::now())
+    until
+        .checked_sub(tick_count_ms())
+        .filter(|left| *left > 0)
+        .map(Duration::from_millis)
 }
 
 /// Record a 429 from the usage endpoint, returning the cooldown it starts.
@@ -448,7 +459,7 @@ fn note_usage_rate_limited() -> Duration {
     let mut guard = usage_cooldown();
     let consecutive = guard.map_or(1, |(n, _)| n.saturating_add(1));
     let len = usage_cooldown_len(consecutive);
-    *guard = Some((consecutive, Instant::now() + len));
+    *guard = Some((consecutive, tick_count_ms() + len.as_millis() as u64));
     len
 }
 

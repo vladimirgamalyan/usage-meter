@@ -37,6 +37,8 @@ glance whether you are burning the limit faster than the clock runs it down.
 - Auth errors pause polling and watch the credential stores (file, WSL,
   Credential Manager); polling resumes automatically after you sign in again.
 - Transient network errors retry with exponential backoff.
+- Waking from sleep polls again immediately and keeps retrying every few
+  seconds until the network is back, instead of waiting out the backoff.
 - A provider that could not be refreshed keeps its last known numbers, drawn
   faded so it is clear they are no longer current.
 - A rate-limited Claude usage endpoint (HTTP 429) is left alone for a growing
