@@ -23,6 +23,8 @@ pub enum PollError {
     AuthRequired,
     TokenExpired,
     RequestFailed,
+    /// The endpoint answered 429 and is left alone until its cooldown expires.
+    RateLimited,
 }
 
 impl PollError {
@@ -404,6 +406,50 @@ pub enum ClaudeSource {
 /// The credential source currently in use, kept for credential watching.
 static ACTIVE_CLAUDE_SOURCE: Mutex<Option<ClaudeSource>> = Mutex::new(None);
 
+/// Asking a rate-limited endpoint again on the regular interval only keeps the
+/// limit engaged, so after a 429 the usage endpoint is left alone for a while:
+/// the doubling base and its cap.
+const USAGE_COOLDOWN_BASE: Duration = Duration::from_secs(10 * 60);
+const USAGE_COOLDOWN_MAX: Duration = Duration::from_secs(60 * 60);
+
+/// Consecutive 429s from the usage endpoint and the instant it may be asked
+/// again.
+static CLAUDE_USAGE_COOLDOWN: Mutex<Option<(u32, Instant)>> = Mutex::new(None);
+
+fn usage_cooldown() -> std::sync::MutexGuard<'static, Option<(u32, Instant)>> {
+    CLAUDE_USAGE_COOLDOWN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Cooldown length after `consecutive` rate-limited answers in a row.
+fn usage_cooldown_len(consecutive: u32) -> Duration {
+    let shift = consecutive.saturating_sub(1).min(10);
+    USAGE_COOLDOWN_BASE
+        .saturating_mul(1u32 << shift)
+        .min(USAGE_COOLDOWN_MAX)
+}
+
+/// Time left before the usage endpoint may be polled again.
+fn usage_cooldown_remaining() -> Option<Duration> {
+    let (_, until) = (*usage_cooldown())?;
+    until.checked_duration_since(Instant::now())
+}
+
+/// Record a 429 from the usage endpoint, returning the cooldown it starts.
+fn note_usage_rate_limited() -> Duration {
+    let mut guard = usage_cooldown();
+    let consecutive = guard.map_or(1, |(n, _)| n.saturating_add(1));
+    let len = usage_cooldown_len(consecutive);
+    *guard = Some((consecutive, Instant::now() + len));
+    len
+}
+
+/// Drop the cooldown: the endpoint answered, or the user asked for a refresh.
+pub fn clear_usage_cooldown() {
+    *usage_cooldown() = None;
+}
+
 struct ClaudeCreds {
     access_token: String,
     expires_at_ms: Option<u64>,
@@ -595,6 +641,13 @@ fn active_claude_source() -> std::sync::MutexGuard<'static, Option<ClaudeSource>
 }
 
 fn fetch_claude_usage(token: &str) -> Result<(UsageData, Vec<ScopedLimit>), PollError> {
+    if let Some(left) = usage_cooldown_remaining() {
+        diagnose::log(&format!(
+            "claude usage endpoint skipped: {}s of rate-limit cooldown left",
+            left.as_secs()
+        ));
+        return Err(PollError::RateLimited);
+    }
     let auth = format!("Bearer {token}");
     let headers = [
         ("Authorization", auth.as_str()),
@@ -612,8 +665,20 @@ fn fetch_claude_usage(token: &str) -> Result<(UsageData, Vec<ScopedLimit>), Poll
             diagnose::log(&format!("claude usage endpoint auth error: {}", resp.status));
             Err(PollError::AuthRequired)
         }
+        Ok(resp) if resp.status == 429 => {
+            // Falling back here would be pointless and costly: the Messages
+            // API carries no model-scoped limits and every call spends real
+            // quota. The caller keeps showing the last known numbers instead.
+            let cooldown = note_usage_rate_limited();
+            diagnose::log(&format!(
+                "claude usage endpoint rate limited, backing off for {}s",
+                cooldown.as_secs()
+            ));
+            Err(PollError::RateLimited)
+        }
         Ok(resp) if resp.is_success() => match resp.json().and_then(|v| parse_claude_usage_value(&v)) {
             Some((mut usage, scoped)) => {
+                clear_usage_cooldown();
                 // The endpoint answered but without reset times: pull only the
                 // times from the Messages API, keeping the percents.
                 if usage.session.resets_at.is_none() || usage.weekly.resets_at.is_none() {
@@ -1549,6 +1614,16 @@ mod tests {
         );
         assert_eq!(seconds_until_text_change(at(1_000_000 + 30), now), Some(1));
         assert_eq!(seconds_until_text_change(at(999_000), now), None);
+    }
+
+    #[test]
+    fn grows_usage_cooldown() {
+        assert_eq!(usage_cooldown_len(1), USAGE_COOLDOWN_BASE);
+        assert_eq!(usage_cooldown_len(2), USAGE_COOLDOWN_BASE * 2);
+        assert_eq!(usage_cooldown_len(3), USAGE_COOLDOWN_BASE * 4);
+        // Capped, including for absurd streaks.
+        assert_eq!(usage_cooldown_len(4), USAGE_COOLDOWN_MAX);
+        assert_eq!(usage_cooldown_len(u32::MAX), USAGE_COOLDOWN_MAX);
     }
 
     #[test]

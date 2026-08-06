@@ -89,8 +89,9 @@ const ID_POLL_INTERVAL_BASE: usize = 0x100; // 0x100..0x130
 const ID_RESET_INTERVAL_BASE: usize = 0x200; // 0x200..0x230
 const ID_PROVIDER_BASE: usize = 0x300; // 0x300..0x320
 
-const POLL_INTERVALS: [(u64, &str); 4] = [
-    (60_000, strings::MENU_1_MINUTE),
+/// A minute-scale interval drives the Claude usage endpoint into rate limiting
+/// it, so the shortest interval on offer is five minutes.
+const POLL_INTERVALS: [(u64, &str); 3] = [
     (300_000, strings::MENU_5_MINUTES),
     (900_000, strings::MENU_15_MINUTES),
     (3_600_000, strings::MENU_1_HOUR),
@@ -155,6 +156,14 @@ fn load_settings() -> Settings {
     if !settings.show_claude_code && !settings.show_codex && !settings.show_antigravity {
         settings.show_claude_code = true;
     }
+    // A settings file written by an older build may name an interval that is
+    // no longer offered (the dropped 1 minute), leaving the menu unchecked.
+    if !POLL_INTERVALS
+        .iter()
+        .any(|(ms, _)| *ms == settings.poll_interval_ms)
+    {
+        settings.poll_interval_ms = DEFAULT_POLL_INTERVAL_MS;
+    }
     settings
 }
 
@@ -196,6 +205,9 @@ struct ProviderView {
     text_7d: String,
     /// Model-scoped weekly rows; only Claude reports these today.
     scoped: Vec<ScopedRowView>,
+    /// The last poll did not refresh this provider: the rows still show the
+    /// last known numbers and are drawn faded.
+    stale: bool,
 }
 
 #[derive(Default, Clone)]
@@ -238,6 +250,9 @@ struct AppState {
     cred_watch_mode: Option<CredWatchMode>,
     cred_watch_snapshot: Vec<String>,
     last_poll_ok: bool,
+    /// Whether the row texts were computed from usage data (as opposed to a
+    /// placeholder), so a countdown tick knows they may be recomputed.
+    texts_from_data: bool,
     /// Whether the fast poll timer is running, so a countdown tick can tell an
     /// expiry that has just happened from one already being polled for.
     fast_poll_active: bool,
@@ -285,6 +300,32 @@ fn placeholder_view(text: &str) -> ProviderView {
         elapsed_7d: None,
         text_7d: text.to_string(),
         scoped: Vec::new(),
+        stale: false,
+    }
+}
+
+/// Mark every provider as stale (or fresh again): staleness follows the poll
+/// as a whole, so the flags are always set together.
+fn set_stale(s: &mut AppState, stale: bool) {
+    s.claude.stale = stale;
+    s.codex.stale = stale;
+    s.antigravity.stale = stale;
+}
+
+/// Providers that did not answer this round keep their last known values, so
+/// their rows stay on real numbers (drawn faded) instead of dropping to an
+/// error marker or, for model-scoped rows, disappearing altogether.
+fn carry_over_last_data(previous: Option<&AppUsageData>, fresh: &mut AppUsageData) {
+    let Some(previous) = previous else { return };
+    if fresh.claude_code.is_none() {
+        fresh.claude_code = previous.claude_code;
+        fresh.claude_scoped = previous.claude_scoped.clone();
+    }
+    if fresh.codex.is_none() {
+        fresh.codex = previous.codex;
+    }
+    if fresh.antigravity.is_none() {
+        fresh.antigravity = previous.antigravity;
     }
 }
 
@@ -306,6 +347,9 @@ fn set_enabled_texts(s: &mut AppState, text: &str) {
         s.antigravity.text_5h = text.to_string();
         s.antigravity.text_7d = text.to_string();
     }
+    // A placeholder is neither data nor stale data.
+    s.texts_from_data = false;
+    set_stale(s, false);
 }
 
 /// Refresh texts and bars from the last successful data. Providers that are
@@ -354,6 +398,7 @@ fn apply_usage_data(s: &mut AppState, data: &AppUsageData, now: SystemTime) {
     if s.show_antigravity {
         apply(&mut s.antigravity, data.antigravity.as_ref(), now);
     }
+    s.texts_from_data = true;
 }
 
 fn recompute_reset_lines(s: &mut AppState, now: SystemTime) {
@@ -405,6 +450,20 @@ fn palette(dark: bool) -> Palette {
     }
 }
 
+/// How much of a color survives when a provider could not be refreshed: the
+/// rest is background, so the whole block visibly fades out.
+const STALE_FADE: f64 = 0.45;
+
+/// Blend a color toward the background, keeping its hue.
+fn fade(color: COLORREF, background: COLORREF, factor: f64) -> COLORREF {
+    let channel = |shift: u32| {
+        let c = ((color.0 >> shift) & 0xFF) as f64;
+        let b = ((background.0 >> shift) & 0xFF) as f64;
+        (b + (c - b) * factor).round().clamp(0.0, 255.0) as u32
+    };
+    COLORREF(channel(0) | (channel(8) << 8) | (channel(16) << 16))
+}
+
 // --- Render model ------------------------------------------------------------
 
 #[derive(Clone)]
@@ -422,6 +481,9 @@ struct RenderBlock {
     title: &'static str,
     accent: COLORREF,
     value_color: COLORREF,
+    /// Row labels and the elapsed-time pointer; faded along with the rest of
+    /// the block while its data is stale.
+    label_color: COLORREF,
     rows: Vec<RenderRow>,
 }
 
@@ -472,6 +534,15 @@ fn build_render_model() -> RenderModel {
             },
         ]
     };
+    // Data that could not be refreshed keeps its numbers but loses its color,
+    // marking the whole block as no longer current.
+    let shade = |color: COLORREF, stale: bool| {
+        if stale {
+            fade(color, pal.background, STALE_FADE)
+        } else {
+            color
+        }
+    };
     // With a single provider the window title already names it: values are
     // drawn in a neutral color and block headings are skipped entirely.
     if s.show_claude {
@@ -485,10 +556,15 @@ fn build_render_model() -> RenderModel {
                 has_bar: true,
             });
         }
+        let stale = s.claude.stale;
         blocks.push(RenderBlock {
             title: strings::PROVIDER_CLAUDE_CODE,
-            accent: pal.accent_claude,
-            value_color: if multi { pal.value_claude } else { pal.value_codex },
+            accent: shade(pal.accent_claude, stale),
+            value_color: shade(
+                if multi { pal.value_claude } else { pal.value_codex },
+                stale,
+            ),
+            label_color: shade(pal.label, stale),
             rows,
         });
     }
@@ -503,22 +579,29 @@ fn build_render_model() -> RenderModel {
                 has_bar: false,
             });
         }
+        let stale = s.codex.stale;
         blocks.push(RenderBlock {
             title: strings::PROVIDER_CODEX,
-            accent: pal.accent_codex,
-            value_color: pal.value_codex,
+            accent: shade(pal.accent_codex, stale),
+            value_color: shade(pal.value_codex, stale),
+            label_color: shade(pal.label, stale),
             rows,
         });
     }
     if s.show_antigravity {
+        let stale = s.antigravity.stale;
         blocks.push(RenderBlock {
             title: strings::PROVIDER_ANTIGRAVITY,
-            accent: pal.accent_antigravity,
-            value_color: if multi {
-                pal.value_antigravity
-            } else {
-                pal.value_codex
-            },
+            accent: shade(pal.accent_antigravity, stale),
+            value_color: shade(
+                if multi {
+                    pal.value_antigravity
+                } else {
+                    pal.value_codex
+                },
+                stale,
+            ),
+            label_color: shade(pal.label, stale),
             rows: usage_rows(&s.antigravity),
         });
     }
@@ -1064,13 +1147,24 @@ fn poll_body(handle: HwndHandle) {
         let mut guard = state();
         let Some(s) = guard.as_mut() else { return };
         match result {
-            Ok(data) => {
+            Ok(mut data) => {
                 s.retry_count = 0;
                 s.last_poll_ok = true;
                 s.auth_error_paused_polling = false;
                 s.cred_watch_mode = None;
                 s.cred_watch_snapshot.clear();
                 s.force_notify_auth_error = false;
+                // At least one provider answered; any other enabled one keeps
+                // its previous numbers and is marked stale.
+                let missing = (
+                    data.claude_code.is_none(),
+                    data.codex.is_none(),
+                    data.antigravity.is_none(),
+                );
+                carry_over_last_data(s.last_data.as_ref(), &mut data);
+                s.claude.stale = missing.0 && data.claude_code.is_some();
+                s.codex.stale = missing.1 && data.codex.is_some();
+                s.antigravity.stale = missing.2 && data.antigravity.is_some();
                 apply_usage_data(s, &data, now);
                 recompute_reset_lines(s, now);
                 if s.show_codex {
@@ -1110,8 +1204,22 @@ fn poll_body(handle: HwndHandle) {
                     }
                     s.force_notify_auth_error = false;
                 } else {
-                    set_enabled_texts(s, strings::PLACEHOLDER_LOADING);
-                    s.retry_count = s.retry_count.saturating_add(1);
+                    // Nothing was refreshed: keep the last known numbers on
+                    // screen, faded, rather than blanking the rows.
+                    match s.last_data.clone() {
+                        Some(data) => {
+                            apply_usage_data(s, &data, now);
+                            set_stale(s, true);
+                        }
+                        None => set_enabled_texts(s, strings::PLACEHOLDER_LOADING),
+                    }
+                    if error == PollError::RateLimited {
+                        // The endpoint is on cooldown: retrying sooner than the
+                        // regular interval would only keep the limit engaged.
+                        s.retry_count = 0;
+                    } else {
+                        s.retry_count = s.retry_count.saturating_add(1);
+                    }
                 }
             }
         }
@@ -1269,13 +1377,15 @@ fn retry_delay_ms(retry_count: u32, poll_interval_ms: u64) -> u64 {
         .min(poll_interval_ms)
 }
 
-/// True when any visible usage window has a reset time in the past.
+/// True when any visible usage window has a reset time in the past. Stale
+/// providers are skipped: their numbers are not being refreshed anyway, so
+/// there is nothing to poll for in a hurry.
 fn any_window_overdue(s: &AppState, now: SystemTime) -> bool {
     let Some(data) = &s.last_data else {
         return false;
     };
     let mut sections = Vec::new();
-    if s.show_claude {
+    if s.show_claude && !s.claude.stale {
         if let Some(u) = &data.claude_code {
             sections.push(u.session.resets_at);
             sections.push(u.weekly.resets_at);
@@ -1284,13 +1394,13 @@ fn any_window_overdue(s: &AppState, now: SystemTime) -> bool {
             sections.push(l.section.resets_at);
         }
     }
-    if s.show_codex {
+    if s.show_codex && !s.codex.stale {
         if let Some(u) = &data.codex {
             sections.push(u.session.resets_at);
             sections.push(u.weekly.resets_at);
         }
     }
-    if s.show_antigravity {
+    if s.show_antigravity && !s.antigravity.stale {
         if let Some(u) = &data.antigravity {
             sections.push(u.session.resets_at);
             sections.push(u.weekly.resets_at);
@@ -1380,7 +1490,9 @@ fn on_data_updated(hwnd: HWND) {
         // Transient failure: exponential backoff, capped at the poll interval.
         set_timer(hwnd, TIMER_POLL, retry_delay_ms(retry, interval));
         set_fast_poll(hwnd, false);
-        kill_timer(hwnd, TIMER_COUNTDOWN);
+        // The rows keep showing the last known data, so their countdowns must
+        // keep running even though the poll failed.
+        reschedule_countdown(hwnd);
     }
     // A model-scoped row appearing or disappearing changes the row count.
     resize_window_to_content(hwnd);
@@ -1394,8 +1506,9 @@ fn on_countdown_tick(hwnd: HWND) {
     let just_expired = {
         let mut guard = state();
         let Some(s) = guard.as_mut() else { return };
-        // Only recompute from real data; placeholders stay as they are.
-        if s.last_poll_ok {
+        // Only recompute from real data; placeholders stay as they are. Stale
+        // rows are recomputed too: their reset times keep counting down.
+        if s.texts_from_data {
             if let Some(data) = s.last_data.clone() {
                 apply_usage_data(s, &data, now);
             }
@@ -1422,6 +1535,9 @@ fn on_countdown_tick(hwnd: HWND) {
 // --- Command handling --------------------------------------------------------
 
 fn on_refresh(hwnd: HWND) {
+    // An explicit refresh overrides the rate-limit cooldown: the user is
+    // asking for the numbers now.
+    poller::clear_usage_cooldown();
     {
         let mut guard = state();
         let Some(s) = guard.as_mut() else { return };
@@ -1683,8 +1799,6 @@ unsafe fn on_paint(hwnd: HWND) {
     FillRect(mem, &client, bg_brush);
 
     let track_brush = CreateSolidBrush(pal.track);
-    // The time pointer stays neutral rather than taking the provider accent.
-    let marker_brush = CreateSolidBrush(pal.label);
     let font = create_font(dpi, FW_MEDIUM.0 as i32);
     let font_bold = create_font(dpi, FW_SEMIBOLD.0 as i32);
     let old_font = SelectObject(mem, font.into());
@@ -1723,6 +1837,9 @@ unsafe fn on_paint(hwnd: HWND) {
             y += m.row_h + m.heading_gap;
         }
         let accent_brush = CreateSolidBrush(block.accent);
+        // The time pointer stays neutral rather than taking the provider
+        // accent, but fades with the block when its data is stale.
+        let marker_brush = CreateSolidBrush(block.label_color);
         let brushes = BarBrushes {
             accent: accent_brush,
             track: track_brush,
@@ -1741,7 +1858,7 @@ unsafe fn on_paint(hwnd: HWND) {
                     right: row_x + m.label_w,
                     bottom: y + m.row_h,
                 },
-                pal.label,
+                block.label_color,
                 true,
             );
             if row.has_bar {
@@ -1763,6 +1880,7 @@ unsafe fn on_paint(hwnd: HWND) {
             y += m.row_h;
         }
         let _ = DeleteObject(accent_brush.into());
+        let _ = DeleteObject(marker_brush.into());
     }
 
     let _ = BitBlt(hdc, 0, 0, cw, ch, Some(mem), 0, 0, SRCCOPY);
@@ -1774,7 +1892,6 @@ unsafe fn on_paint(hwnd: HWND) {
     let _ = DeleteObject(font_bold.into());
     let _ = DeleteObject(bg_brush.into());
     let _ = DeleteObject(track_brush.into());
-    let _ = DeleteObject(marker_brush.into());
     let _ = DeleteObject(bitmap.into());
     let _ = DeleteDC(mem);
     let _ = EndPaint(hwnd, &ps);
@@ -2040,6 +2157,7 @@ pub fn run() {
             cred_watch_mode: None,
             cred_watch_snapshot: Vec::new(),
             last_poll_ok: false,
+            texts_from_data: false,
             fast_poll_active: false,
             poll_slot: RequestSlot::default(),
             credits_slot: RequestSlot::default(),
@@ -2142,6 +2260,7 @@ fn initial_render_model(settings: &Settings) -> RenderModel {
                 title: "",
                 accent: pal.accent_claude,
                 value_color: pal.value_claude,
+                label_color: pal.label,
                 rows: empty_rows(),
             });
         }

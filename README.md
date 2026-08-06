@@ -47,6 +47,10 @@ Usage Meter                        ─ ×
 - Auth errors pause polling and watch the credential stores (file, WSL,
   Credential Manager); polling resumes automatically after you sign in again.
 - Transient network errors retry with exponential backoff.
+- A provider that could not be refreshed keeps its last known numbers, drawn
+  faded so it is clear they are no longer current.
+- A rate-limited Claude usage endpoint (HTTP 429) is left alone for a growing
+  cooldown instead of being polled on every round.
 - Per-Monitor V2 DPI awareness, position persistence, single-instance guard.
 - Proxy support (`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`) with a CONNECT tunnel:
   TLS stays end-to-end, the proxy never sees bearer tokens.
@@ -85,7 +89,7 @@ the title-bar icon, right-click the caption or press Alt+Space — and is also
 available as a right-click context menu over the window itself. It provides:
 
 - **Refresh** — poll immediately.
-- **Update Frequency** — 1 minute to 1 hour (default 15 minutes).
+- **Update Frequency** — 5 minutes to 1 hour (default 15 minutes).
 - **Reset Credit Frequency** — how often the Codex reset-credit list is
   re-fetched (default 6 hours); shown only when Codex is enabled.
 - **Models** — which providers to show (at least one is always enabled).

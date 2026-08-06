@@ -26,7 +26,6 @@ pub const MENU_RESET_CREDIT_FREQUENCY: &str = "Reset Credit Frequency";
 pub const MENU_MODELS: &str = "Models";
 pub const MENU_EXIT: &str = "Exit";
 
-pub const MENU_1_MINUTE: &str = "1 Minute";
 pub const MENU_5_MINUTES: &str = "5 Minutes";
 pub const MENU_15_MINUTES: &str = "15 Minutes";
 pub const MENU_1_HOUR: &str = "1 Hour";
