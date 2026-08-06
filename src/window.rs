@@ -515,12 +515,13 @@ struct RenderModel {
 
 impl RenderModel {
     /// Model-scoped rows carry model names that outgrow the default
-    /// two-character label column.
+    /// two-character label column. Barless rows label the bar column instead,
+    /// so their label has no say in how wide that column is.
     fn wide_labels(&self) -> bool {
         self.blocks
             .iter()
             .flat_map(|b| &b.rows)
-            .any(|r| r.label.chars().count() > 2)
+            .any(|r| r.has_bar && r.label.chars().count() > 2)
     }
 }
 
@@ -1900,18 +1901,24 @@ unsafe fn on_paint(hwnd: HWND) {
             if row_index > 0 {
                 y += m.row_gap;
             }
-            draw_text_in(
-                mem,
-                &row.label,
+            // A row without a bar has the bar column to itself and spells its
+            // label out there; rows with one keep the narrow label column.
+            let label_rect = if row.has_bar {
                 RECT {
                     left: content_x,
                     top: y,
                     right: content_x + m.label_w,
                     bottom: y + m.row_h,
-                },
-                block.label_color,
-                true,
-            );
+                }
+            } else {
+                RECT {
+                    left: bar_x,
+                    top: y,
+                    right: bar_x + m.bar_width(),
+                    bottom: y + m.row_h,
+                }
+            };
+            draw_text_in(mem, &row.label, label_rect, block.label_color, row.has_bar);
             if row.has_bar {
                 draw_bar(mem, &m, bar_x, y, row.percent, row.elapsed, brushes);
             }

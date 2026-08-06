@@ -13,7 +13,7 @@ pub const PROVIDER_ANTIGRAVITY: &str = "Antigravity";
 
 pub const LABEL_5H: &str = "5h";
 pub const LABEL_7D: &str = "7d";
-pub const LABEL_RESET_CREDIT: &str = "\u{21BA}";
+pub const LABEL_RESET_CREDIT: &str = "reset";
 
 pub const PLACEHOLDER_NONE: &str = "--";
 pub const PLACEHOLDER_LOADING: &str = "...";
