@@ -65,7 +65,11 @@ const LABEL_WIDTH: i32 = 18;
 const LABEL_WIDTH_WIDE: i32 = 34;
 const LABEL_RIGHT_MARGIN: i32 = 10;
 const BAR_RIGHT_MARGIN: i32 = 4;
-const TEXT_WIDTH: i32 = 86;
+/// Value column, sized for the longest line it prints: `100% · 23h59m`,
+/// thirteen characters of Consolas at seven pixels each at 96 DPI. A countdown
+/// with two-digit hours or days is what makes it thirteen; a narrower column
+/// clips the last character.
+const TEXT_WIDTH: i32 = 91;
 /// Narrower value column used while the percentage is hidden: only the
 /// countdown is left to print.
 const TEXT_WIDTH_NO_PERCENT: i32 = 44;

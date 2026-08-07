@@ -1692,6 +1692,25 @@ mod tests {
         assert_eq!(pad_bare_countdown("2h11m", false), "2h11m");
     }
 
+    /// The value column in the window is a fixed width, so the longest line it
+    /// ever prints has to stay at the length `window::TEXT_WIDTH` was sized
+    /// for: a two-digit countdown behind the percent column.
+    #[test]
+    fn longest_value_line_stays_thirteen_characters() {
+        let now = at(1_000_000);
+        let section = UsageSection {
+            percentage: 100.0,
+            resets_at: Some(at(1_000_000 + 23 * 3600 + 59 * 60)),
+            window_seconds: Some(SEVEN_DAY_SECONDS),
+        };
+        let usage = format_usage_text(&section, now, true);
+        assert_eq!(usage, "100% \u{00B7} 23h59m");
+        assert_eq!(usage.chars().count(), 13);
+        // A monthly reset credit is the other line that reaches two digits.
+        let monthly = format_countdown(at(1_000_000 + 29 * 86400 + 13 * 3600), now);
+        assert_eq!(pad_bare_countdown(&monthly, true).chars().count(), 13);
+    }
+
     #[test]
     fn formats_usage_text_without_percent() {
         let now = at(1_000_000);
