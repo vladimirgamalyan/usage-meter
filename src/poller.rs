@@ -1128,11 +1128,14 @@ fn parse_codex_reset_credits(v: &serde_json::Value) -> CodexResetCredits {
             })
             .map(|c| CodexResetCredit {
                 // A missing, non-string or blank title leaves `None`: the
-                // generic label stands in when the line is built.
+                // generic label stands in when the line is built. The
+                // parenthesised window the API appends ("Full reset (Weekly
+                // limit)") is dropped: it does not fit the row and adds
+                // nothing the name does not already say.
                 title: c
                     .get("title")
                     .and_then(|t| t.as_str())
-                    .map(str::trim)
+                    .map(|t| t.split_once('(').map_or(t, |(head, _)| head).trim())
                     .filter(|t| !t.is_empty())
                     .map(String::from),
                 expires_at: c
@@ -1869,19 +1872,21 @@ mod tests {
     fn parses_codex_reset_credits() {
         let v = serde_json::json!({
             "credits": [
-                {"status": "available", "expires_at": "2036-08-12T17:25:40Z", "is_supported_by_plan": true, "title": "Full reset"},
+                {"status": "available", "expires_at": "2036-08-12T17:25:40Z", "is_supported_by_plan": true, "title": "Full reset (Weekly limit)"},
                 {"status": "used", "expires_at": "2036-08-12T17:25:40Z"},
                 {"expires_at": "2036-01-01T00:00:00Z", "title": "  "},
                 {"status": "available", "is_supported_by_plan": false},
-                {"status": "available", "title": 7}
+                {"status": "available", "title": 7},
+                {"status": "available", "title": "(Weekly limit)"}
             ],
             "available_count": 3
         });
         let credits = parse_codex_reset_credits(&v);
         // used and unsupported are filtered out; missing status counts as available.
-        assert_eq!(credits.credits.len(), 3);
+        assert_eq!(credits.credits.len(), 4);
+        // The parenthesised window is cut off the title.
         assert_eq!(credits.credits[0].title.as_deref(), Some("Full reset"));
-        // Blank, non-string and missing titles all leave None.
+        // Blank, non-string, missing and parentheses-only titles all leave None.
         assert_eq!(credits.credits[1].title, None);
         assert_eq!(credits.credits[2].title, None);
         assert_eq!(
@@ -1890,7 +1895,7 @@ mod tests {
                 .iter()
                 .filter(|c| c.expires_at.is_none())
                 .count(),
-            1
+            2
         );
 
         // No credits array: available_count yields N nameless, undated entries.
@@ -1927,6 +1932,7 @@ mod tests {
         // a credit without a title falls back to the generic label.
         assert_eq!(
             shown,
+        assert_eq!(credits.credits[3].title, None);
             vec![
                 ("reset", "1h0m"),
                 ("Full reset", "9d5h"),
