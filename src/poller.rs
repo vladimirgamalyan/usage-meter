@@ -761,10 +761,14 @@ fn fetch_claude_usage(token: &str) -> Result<(UsageData, Vec<ScopedLimit>), Poll
             Some((mut usage, scoped)) => {
                 clear_usage_cooldown();
                 // The endpoint answered but without reset times: pull only the
-                // times from the Messages API, keeping the percents.
-                if usage.session.resets_at.is_none() || usage.weekly.resets_at.is_none() {
+                // times from the Messages API, keeping the percents. A window
+                // the plan does not have has no time to pull, and asking for
+                // one would spend quota on every poll.
+                let session_needs_time =
+                    !usage.session_missing && usage.session.resets_at.is_none();
+                if session_needs_time || usage.weekly.resets_at.is_none() {
                     if let Ok(times) = claude_messages_fallback(token) {
-                        if usage.session.resets_at.is_none() {
+                        if session_needs_time {
                             usage.session.resets_at = times.session.resets_at;
                         }
                         if usage.weekly.resets_at.is_none() {
@@ -806,6 +810,8 @@ fn parse_claude_usage_value(v: &serde_json::Value) -> Option<(UsageData, Vec<Sco
     }
     Some((
         UsageData {
+            // Plans without a five-hour limit answer `"five_hour": null`.
+            session_missing: five.is_none(),
             session: five.unwrap_or_default(),
             weekly: seven.unwrap_or_default(),
         },
@@ -941,6 +947,7 @@ fn parse_claude_ratelimit_headers(resp: &http::Response) -> UsageData {
             resets_at: seven_reset,
             window_seconds: Some(SEVEN_DAY_SECONDS),
         },
+        session_missing: false,
     }
 }
 
@@ -1084,6 +1091,7 @@ fn parse_codex_usage(v: &serde_json::Value) -> (UsageData, Option<usize>) {
             UsageData {
                 session: five,
                 weekly: seven,
+                session_missing: false,
             }
         }
         // Exactly one window always lands on the 7d row, regardless of its
@@ -1092,8 +1100,12 @@ fn parse_codex_usage(v: &serde_json::Value) -> (UsageData, Option<usize>) {
         (Some(w), None) | (None, Some(w)) => UsageData {
             session: UsageSection::default(),
             weekly: w,
+            session_missing: true,
         },
-        (None, None) => UsageData::default(),
+        (None, None) => UsageData {
+            session_missing: true,
+            ..UsageData::default()
+        },
     };
     (usage, available)
 }
@@ -1421,6 +1433,7 @@ fn antigravity_group_usage(group: &serde_json::Value) -> Option<UsageData> {
     Some(UsageData {
         session: session.unwrap_or_default(),
         weekly: weekly.unwrap_or_default(),
+        session_missing: false,
     })
 }
 
@@ -1475,6 +1488,7 @@ fn parse_antigravity_models(v: &serde_json::Value) -> Option<UsageData> {
     best.map(|session| UsageData {
         session,
         weekly: UsageSection::default(),
+        session_missing: false,
     })
 }
 
@@ -1828,6 +1842,31 @@ mod tests {
     }
 
     #[test]
+    fn claude_plan_without_five_hour_window() {
+        // Trimmed from a real answer of a plan with no five-hour limit.
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"five_hour":null,
+                "seven_day":{"utilization":1.0,"resets_at":"2026-11-08T08:59:59.619859+00:00"},
+                "limits":[{"kind":"weekly_all","group":"weekly","percent":1,
+                           "resets_at":"2026-11-08T08:59:59.619859+00:00","scope":null}]}"#,
+        )
+        .unwrap();
+        let (usage, _) = parse_claude_usage_value(&v).unwrap();
+        assert!(usage.session_missing);
+        assert_eq!(usage.weekly.percentage, 1.0);
+
+        // An idle window (nothing used, no reset time yet) is still a window.
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"five_hour":{"utilization":0.0,"resets_at":null},
+                "seven_day":{"utilization":1.0,"resets_at":"2026-11-08T08:59:59Z"}}"#,
+        )
+        .unwrap();
+        let (usage, _) = parse_claude_usage_value(&v).unwrap();
+        assert!(!usage.session_missing);
+        assert!(usage.session.is_unsupported());
+    }
+
+    #[test]
     fn maps_codex_windows() {
         // Both windows, normal order.
         let v: serde_json::Value = serde_json::from_str(
@@ -1839,6 +1878,7 @@ mod tests {
         let (usage, available) = parse_codex_usage(&v);
         assert_eq!(usage.session.percentage, 7.0);
         assert_eq!(usage.weekly.percentage, 42.0);
+        assert!(!usage.session_missing);
         assert_eq!(available, Some(1));
 
         // Swapped: primary longer than a day, secondary not.
@@ -1859,13 +1899,16 @@ mod tests {
         .unwrap();
         let (usage, _) = parse_codex_usage(&v);
         assert!(usage.session.is_unsupported());
+        assert!(usage.session_missing);
         assert_eq!(usage.weekly.percentage, 61.0);
 
         // Absent and null rate_limit both survive.
         let (usage, _) = parse_codex_usage(&serde_json::json!({}));
         assert!(usage.session.is_unsupported() && usage.weekly.is_unsupported());
+        assert!(usage.session_missing);
         let (usage, _) = parse_codex_usage(&serde_json::json!({ "rate_limit": null }));
         assert!(usage.session.is_unsupported() && usage.weekly.is_unsupported());
+        assert!(usage.session_missing);
     }
 
     #[test]
@@ -1889,6 +1932,7 @@ mod tests {
         // Blank, non-string, missing and parentheses-only titles all leave None.
         assert_eq!(credits.credits[1].title, None);
         assert_eq!(credits.credits[2].title, None);
+        assert_eq!(credits.credits[3].title, None);
         assert_eq!(
             credits
                 .credits
@@ -1932,7 +1976,6 @@ mod tests {
         // a credit without a title falls back to the generic label.
         assert_eq!(
             shown,
-        assert_eq!(credits.credits[3].title, None);
             vec![
                 ("reset", "1h0m"),
                 ("Full reset", "9d5h"),

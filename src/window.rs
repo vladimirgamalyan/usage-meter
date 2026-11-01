@@ -406,7 +406,7 @@ fn apply_usage_data(s: &mut AppState, data: &AppUsageData, now: SystemTime) {
                 view.pct_5h = u.session.percentage;
                 view.elapsed_5h = poller::elapsed_percent(&u.session, now);
                 view.text_5h = poller::format_usage_text(&u.session, now, show_percent);
-                view.missing_5h = u.session.is_unsupported();
+                view.missing_5h = u.session_missing;
                 view.pct_7d = u.weekly.percentage;
                 view.elapsed_7d = poller::elapsed_percent(&u.weekly, now);
                 view.text_7d = poller::format_usage_text(&u.weekly, now, show_percent);
@@ -578,12 +578,12 @@ fn build_render_model() -> RenderModel {
     let pal = palette(s.dark);
     let multi = s.enabled_count() >= 2;
     let mut blocks = Vec::new();
-    // `drop_missing_5h` is for Codex, whose plans differ in whether they have a
-    // five-hour window at all: a plan without one drops the row instead of
-    // printing `--` forever, and gets it back as soon as the window returns.
-    let usage_rows = |view: &ProviderView, drop_missing_5h: bool| {
+    // Claude Code and Codex plans differ in whether they have a five-hour
+    // window at all: a plan without one drops the row instead of printing `--`
+    // forever, and gets it back as soon as the window returns.
+    let usage_rows = |view: &ProviderView| {
         let mut rows = Vec::with_capacity(2);
-        if !(drop_missing_5h && view.missing_5h) {
+        if !view.missing_5h {
             rows.push(RenderRow {
                 label: strings::LABEL_5H.to_string(),
                 percent: view.pct_5h,
@@ -613,7 +613,7 @@ fn build_render_model() -> RenderModel {
     // With a single provider the window title already names it, so block
     // headings are skipped entirely and their color never comes up.
     if s.show_claude {
-        let mut rows = usage_rows(&s.claude, false);
+        let mut rows = usage_rows(&s.claude);
         for row in &s.claude.scoped {
             rows.push(RenderRow {
                 label: row.label.clone(),
@@ -634,7 +634,7 @@ fn build_render_model() -> RenderModel {
         });
     }
     if s.show_codex {
-        let mut rows = usage_rows(&s.codex, true);
+        let mut rows = usage_rows(&s.codex);
         for line in &s.codex_reset_lines {
             rows.push(RenderRow {
                 label: line.label.clone(),
@@ -662,7 +662,7 @@ fn build_render_model() -> RenderModel {
             heading_color: shade(pal.heading_antigravity, stale),
             value_color: shade(pal.value, stale),
             label_color: shade(pal.label, stale),
-            rows: usage_rows(&s.antigravity, false),
+            rows: usage_rows(&s.antigravity),
         });
     }
     RenderModel {

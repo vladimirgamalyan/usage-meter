@@ -26,6 +26,10 @@ impl UsageSection {
 pub struct UsageData {
     pub session: UsageSection,
     pub weekly: UsageSection,
+    /// The provider answered without a five-hour window: the plan has none.
+    /// Not the same as a window with nothing in it yet (0%, no reset time),
+    /// which some plans report while idle and which keeps its row.
+    pub session_missing: bool,
 }
 
 /// A weekly limit scoped to a single model (e.g. Fable), reported by the
