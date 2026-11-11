@@ -48,6 +48,10 @@ pub struct AppUsageData {
     /// Model-scoped weekly limits reported by the Claude usage endpoint;
     /// empty when the endpoint (or the fallback path) does not report any.
     pub claude_scoped: Vec<ScopedLimit>,
+    /// Limit resets granted to the Claude account (e.g. a Fable reset), one
+    /// credit per reset left; empty when there are none or the fallback path
+    /// answered.
+    pub claude_resets: ResetCredits,
     pub codex: Option<UsageData>,
     pub antigravity: Option<UsageData>,
     /// `available_count` piggybacked on the Codex usage response; used as a
@@ -55,17 +59,18 @@ pub struct AppUsageData {
     pub codex_reset_credits_available: Option<usize>,
 }
 
-/// One Codex rate-limit-reset credit. `None` expiry means the credit has no
-/// known expiration date; `None` title means the response carried no usable
-/// name for it and the generic label is used instead.
+/// One limit reset: a Codex rate-limit-reset credit or a Claude Code reset.
+/// `None` expiry means the credit has no known expiration date; `None` title
+/// means the response carried no usable name for it and the generic label is
+/// used instead.
 #[derive(Clone, Debug, Default)]
-pub struct CodexResetCredit {
+pub struct ResetCredit {
     pub title: Option<String>,
     pub expires_at: Option<SystemTime>,
 }
 
-/// The Codex rate-limit-reset credit list.
+/// A provider's list of limit resets.
 #[derive(Clone, Debug, Default)]
-pub struct CodexResetCredits {
-    pub credits: Vec<CodexResetCredit>,
+pub struct ResetCredits {
+    pub credits: Vec<ResetCredit>,
 }

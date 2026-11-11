@@ -10,7 +10,7 @@ use windows::Win32::System::SystemInformation::GetTickCount64;
 use crate::diagnose;
 use crate::http;
 use crate::models::{
-    AppUsageData, CodexResetCredit, CodexResetCredits, ScopedLimit, UsageData, UsageSection,
+    AppUsageData, ResetCredit, ResetCredits, ScopedLimit, UsageData, UsageSection,
 };
 use crate::strings;
 
@@ -61,9 +61,10 @@ pub fn poll(
 
     if show_claude {
         match poll_claude() {
-            Ok((usage, scoped)) => {
+            Ok((usage, scoped, resets)) => {
                 data.claude_code = Some(usage);
                 data.claude_scoped = scoped;
+                data.claude_resets = resets;
                 any_ok = true;
             }
             Err(e) => {
@@ -312,13 +313,17 @@ pub fn parse_iso8601(s: &str) -> Option<SystemTime> {
     ))
 }
 
-/// Countdown text: `4d2h`, `2h11m`, `5m`, `30s`, or `now` once expired.
+/// Countdown text: `118d`, `4d2h`, `2h11m`, `5m`, `30s`, or `now` once expired.
 pub fn format_countdown(until: SystemTime, now: SystemTime) -> String {
     let Ok(rem) = until.duration_since(now) else {
         return "now".to_string();
     };
     let secs = rem.as_secs();
-    if secs >= 86400 {
+    if secs >= 100 * 86400 {
+        // Three-digit days leave no room in the value column for the hours,
+        // which say little that far out anyway (a reset good for months).
+        format!("{}d", secs / 86400)
+    } else if secs >= 86400 {
         format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
     } else if secs >= 3600 {
         format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
@@ -427,17 +432,17 @@ pub struct ResetLine {
     pub countdown: String,
 }
 
-/// Codex reset-credit display lines, recomputed on every countdown tick.
+/// Reset-credit display lines, recomputed on every countdown tick.
 /// Expired credits are dropped here (not at parse time) so an expired line
 /// disappears on its own without a new network request. Credits without an
 /// expiry cannot be ordered and go last, each on its own line.
-pub fn build_reset_lines(credits: &CodexResetCredits, now: SystemTime) -> Vec<ResetLine> {
-    let label = |c: &CodexResetCredit| {
+pub fn build_reset_lines(credits: &ResetCredits, now: SystemTime) -> Vec<ResetLine> {
+    let label = |c: &ResetCredit| {
         c.title
             .clone()
             .unwrap_or_else(|| strings::LABEL_RESET_CREDIT.to_string())
     };
-    let mut dated: Vec<(SystemTime, &CodexResetCredit)> = credits
+    let mut dated: Vec<(SystemTime, &ResetCredit)> = credits
         .credits
         .iter()
         .filter_map(|c| c.expires_at.filter(|t| *t > now).map(|t| (t, c)))
@@ -464,7 +469,15 @@ pub fn build_reset_lines(credits: &CodexResetCredits, now: SystemTime) -> Vec<Re
 
 // --- Claude Code -------------------------------------------------------------
 
-const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+/// `cedar_ember=1` adds the block listing the limit resets granted to the
+/// account; `skip_spend=1` leaves out the spend block nothing here reads. Both
+/// are what Claude Code itself sends for this block.
+const CLAUDE_USAGE_URL: &str =
+    "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1";
+/// The resets are offered to the Claude Code CLI only, recognized by its
+/// User-Agent: any other client gets `"ineligible_reason": "surface"` and an
+/// empty list. The version is the one this was checked against (ADR 0005).
+const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.322 (external, cli)";
 const CLAUDE_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const CLAUDE_BETA: &str = "oauth-2025-04-20";
 const CLAUDE_FALLBACK_MODELS: [&str; 2] = ["claude-3-haiku-20240307", "claude-haiku-4-5-20251001"];
@@ -677,7 +690,11 @@ fn refresh_claude_token(source: &ClaudeSource) {
     }
 }
 
-fn poll_claude() -> Result<(UsageData, Vec<ScopedLimit>), PollError> {
+/// One Claude answer: the shared windows, the model-scoped limits and the
+/// limit resets granted to the account.
+type ClaudeAnswer = (UsageData, Vec<ScopedLimit>, ResetCredits);
+
+fn poll_claude() -> Result<ClaudeAnswer, PollError> {
     let mut sources = ClaudeSourceIter::new();
     let mut current: Option<(ClaudeSource, ClaudeCreds)> = None;
     while let Some(source) = sources.next() {
@@ -721,7 +738,7 @@ fn active_claude_source() -> std::sync::MutexGuard<'static, Option<ClaudeSource>
     ACTIVE_CLAUDE_SOURCE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn fetch_claude_usage(token: &str) -> Result<(UsageData, Vec<ScopedLimit>), PollError> {
+fn fetch_claude_usage(token: &str) -> Result<ClaudeAnswer, PollError> {
     if let Some(left) = usage_cooldown_remaining() {
         diagnose::log(&format!(
             "claude usage endpoint skipped: {}s of rate-limit cooldown left",
@@ -733,10 +750,14 @@ fn fetch_claude_usage(token: &str) -> Result<(UsageData, Vec<ScopedLimit>), Poll
     let headers = [
         ("Authorization", auth.as_str()),
         ("anthropic-beta", CLAUDE_BETA),
+        ("User-Agent", CLAUDE_CLI_USER_AGENT),
+        ("x-app", "cli"),
     ];
     // The Messages API fallback reports only the shared windows: model-scoped
-    // limits are available on the JSON endpoint alone.
-    let fallback = |token| claude_messages_fallback(token).map(|u| (u, Vec::new()));
+    // limits and resets are available on the JSON endpoint alone.
+    let fallback = |token| {
+        claude_messages_fallback(token).map(|u| (u, Vec::new(), ResetCredits::default()))
+    };
     match http::get(CLAUDE_USAGE_URL, &headers) {
         Err(e) => {
             diagnose::log(&format!("claude usage endpoint request failed: {e}"));
@@ -758,7 +779,7 @@ fn fetch_claude_usage(token: &str) -> Result<(UsageData, Vec<ScopedLimit>), Poll
             Err(PollError::RateLimited)
         }
         Ok(resp) if resp.is_success() => match resp.json().and_then(|v| parse_claude_usage_value(&v)) {
-            Some((mut usage, scoped)) => {
+            Some((mut usage, scoped, resets)) => {
                 clear_usage_cooldown();
                 // The endpoint answered but without reset times: pull only the
                 // times from the Messages API, keeping the percents. A window
@@ -776,7 +797,7 @@ fn fetch_claude_usage(token: &str) -> Result<(UsageData, Vec<ScopedLimit>), Poll
                         }
                     }
                 }
-                Ok((usage, scoped))
+                Ok((usage, scoped, resets))
             }
             None => {
                 diagnose::log("claude usage endpoint returned unparseable JSON");
@@ -790,7 +811,7 @@ fn fetch_claude_usage(token: &str) -> Result<(UsageData, Vec<ScopedLimit>), Poll
     }
 }
 
-fn parse_claude_usage_value(v: &serde_json::Value) -> Option<(UsageData, Vec<ScopedLimit>)> {
+fn parse_claude_usage_value(v: &serde_json::Value) -> Option<ClaudeAnswer> {
     let section = |name: &str, window_seconds: u64| -> Option<UsageSection> {
         let s = v.get(name)?;
         Some(UsageSection {
@@ -816,7 +837,77 @@ fn parse_claude_usage_value(v: &serde_json::Value) -> Option<(UsageData, Vec<Sco
             weekly: seven.unwrap_or_default(),
         },
         parse_claude_scoped_limits(v),
+        parse_claude_resets(v),
     ))
+}
+
+/// Limit resets granted to the account, from the `cedar_ember` block: one
+/// credit per reset left, so two resets of a kind are two rows, the way Codex
+/// credits are. Paused grants are skipped. The API's own labels are whole
+/// sentences ("New model launch: one Fable reset for ..."), so a reset is
+/// named by what it does instead, in Claude Code's words.
+fn parse_claude_resets(v: &serde_json::Value) -> ResetCredits {
+    let Some(block) = non_null(v.get("cedar_ember")) else {
+        return ResetCredits::default();
+    };
+    if block.get("eligible").and_then(|e| e.as_bool()) == Some(false) {
+        // Logged because the cause is server-side and silent otherwise, e.g.
+        // `surface` once the User-Agent is no longer accepted.
+        diagnose::log(&format!(
+            "claude resets: account not eligible ({})",
+            block
+                .get("ineligible_reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("no reason given")
+        ));
+    }
+    let Some(grants) = block.get("grants").and_then(|g| g.as_array()) else {
+        return ResetCredits::default();
+    };
+    let credits = grants
+        .iter()
+        .filter(|g| g.get("paused").and_then(|p| p.as_bool()) != Some(true))
+        .flat_map(|g| {
+            let left = g.get("resets_left").and_then(|n| n.as_u64()).unwrap_or(0);
+            let credit = ResetCredit {
+                title: Some(claude_reset_label(g).to_string()),
+                expires_at: g
+                    .get("ends_at")
+                    .and_then(|t| t.as_str())
+                    .and_then(parse_iso8601),
+            };
+            std::iter::repeat_n(credit, left as usize)
+        })
+        .collect();
+    ResetCredits { credits }
+}
+
+/// What a reset does, decided the way Claude Code decides it: giving back
+/// what Fable used makes it a Fable reset; otherwise its `type` names it, and
+/// failing that, the windows it clears.
+fn claude_reset_label(grant: &serde_json::Value) -> &'static str {
+    if grant.get("gives_back_weekly").and_then(|b| b.as_bool()) == Some(true) {
+        return strings::LABEL_RESET_FABLE;
+    }
+    match grant.get("type").and_then(|t| t.as_str()) {
+        Some("fable") => return strings::LABEL_RESET_FABLE,
+        Some("session") => return strings::LABEL_RESET_SESSION,
+        Some("weekly") => return strings::LABEL_RESET_WEEKLY,
+        Some("full") => return strings::LABEL_RESET_FULL,
+        _ => {}
+    }
+    let clears: Vec<&str> = grant
+        .get("clears")
+        .and_then(|c| c.as_array())
+        .map(|a| a.iter().filter_map(|c| c.as_str()).collect())
+        .unwrap_or_default();
+    let five_hour = clears.contains(&"five_hour");
+    let other = clears.iter().any(|c| *c != "five_hour");
+    match (five_hour, other) {
+        (true, false) => strings::LABEL_RESET_SESSION,
+        (false, true) => strings::LABEL_RESET_WEEKLY,
+        _ => strings::LABEL_RESET_FULL,
+    }
 }
 
 /// Model-scoped weekly limits (e.g. the separate Fable window) from the
@@ -1111,7 +1202,7 @@ fn parse_codex_usage(v: &serde_json::Value) -> (UsageData, Option<usize>) {
 }
 
 /// Fetch the Codex reset-credit list.
-pub fn poll_codex_reset_credits() -> Result<CodexResetCredits, PollError> {
+pub fn poll_codex_reset_credits() -> Result<ResetCredits, PollError> {
     let resp = codex_request(CODEX_CREDITS_URL)?;
     if !resp.is_success() {
         diagnose::log(&format!("codex credits endpoint status {}", resp.status));
@@ -1124,7 +1215,7 @@ pub fn poll_codex_reset_credits() -> Result<CodexResetCredits, PollError> {
     Ok(parse_codex_reset_credits(&v))
 }
 
-fn parse_codex_reset_credits(v: &serde_json::Value) -> CodexResetCredits {
+fn parse_codex_reset_credits(v: &serde_json::Value) -> ResetCredits {
     if let Some(credits) = v.get("credits").and_then(|c| c.as_array()) {
         let credits = credits
             .iter()
@@ -1138,7 +1229,7 @@ fn parse_codex_reset_credits(v: &serde_json::Value) -> CodexResetCredits {
                 };
                 supported && available
             })
-            .map(|c| CodexResetCredit {
+            .map(|c| ResetCredit {
                 // A missing, non-string or blank title leaves `None`: the
                 // generic label stands in when the line is built. The
                 // parenthesised window the API appends ("Full reset (Weekly
@@ -1156,14 +1247,14 @@ fn parse_codex_reset_credits(v: &serde_json::Value) -> CodexResetCredits {
                     .and_then(parse_iso8601),
             })
             .collect();
-        CodexResetCredits { credits }
+        ResetCredits { credits }
     } else if let Some(n) = v.get("available_count").and_then(|n| n.as_u64()) {
         // No credits array: available_count yields N nameless, undated entries.
-        CodexResetCredits {
-            credits: vec![CodexResetCredit::default(); n as usize],
+        ResetCredits {
+            credits: vec![ResetCredit::default(); n as usize],
         }
     } else {
-        CodexResetCredits::default()
+        ResetCredits::default()
     }
 }
 
@@ -1653,6 +1744,9 @@ mod tests {
     #[test]
     fn formats_countdown() {
         let now = at(1_000_000);
+        // Three-digit days drop the hours; two-digit days keep them.
+        assert_eq!(format_countdown(at(1_000_000 + 118 * 86400 + 13 * 3600), now), "118d");
+        assert_eq!(format_countdown(at(1_000_000 + 99 * 86400 + 13 * 3600), now), "99d13h");
         assert_eq!(format_countdown(at(1_000_000 + 4 * 86400 + 2 * 3600), now), "4d2h");
         assert_eq!(format_countdown(at(1_000_000 + 2 * 3600 + 11 * 60), now), "2h11m");
         assert_eq!(format_countdown(at(1_000_000 + 5 * 60), now), "5m");
@@ -1823,7 +1917,7 @@ mod tests {
                    "scope":{"model":{"id":null,"display_name":"Fable"},"surface":null}}]}"#,
         )
         .unwrap();
-        let (usage, scoped) = parse_claude_usage_value(&v).unwrap();
+        let (usage, scoped, _) = parse_claude_usage_value(&v).unwrap();
         assert_eq!(usage.session.percentage, 5.0);
         assert_eq!(usage.weekly.percentage, 25.0);
         assert_eq!(scoped.len(), 1);
@@ -1837,7 +1931,7 @@ mod tests {
             r#"{"five_hour":{"utilization":5.0,"resets_at":"2026-08-04T13:59:59Z"}}"#,
         )
         .unwrap();
-        let (_, scoped) = parse_claude_usage_value(&v).unwrap();
+        let (_, scoped, _) = parse_claude_usage_value(&v).unwrap();
         assert!(scoped.is_empty());
     }
 
@@ -1851,7 +1945,7 @@ mod tests {
                            "resets_at":"2026-11-08T08:59:59.619859+00:00","scope":null}]}"#,
         )
         .unwrap();
-        let (usage, _) = parse_claude_usage_value(&v).unwrap();
+        let (usage, _, _) = parse_claude_usage_value(&v).unwrap();
         assert!(usage.session_missing);
         assert_eq!(usage.weekly.percentage, 1.0);
 
@@ -1861,9 +1955,70 @@ mod tests {
                 "seven_day":{"utilization":1.0,"resets_at":"2026-11-08T08:59:59Z"}}"#,
         )
         .unwrap();
-        let (usage, _) = parse_claude_usage_value(&v).unwrap();
+        let (usage, _, _) = parse_claude_usage_value(&v).unwrap();
         assert!(!usage.session_missing);
         assert!(usage.session.is_unsupported());
+    }
+
+    #[test]
+    fn parses_claude_resets() {
+        // Trimmed from a real answer: one weekly reset and two Fable resets.
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"five_hour":null,
+                "seven_day":{"utilization":56.0,"resets_at":"2026-11-15T08:59:59Z"},
+                "cedar_ember":{"eligible":true,"ineligible_reason":null,"grants":[
+                  {"id":"full-reset-2611","label":"One full limit reset (November 2026)",
+                   "resets_total":1,"resets_left":1,"ends_at":"2026-12-10T22:00:00+00:00",
+                   "clears":["seven_day","seven_day_overage_included"],"paused":false,
+                   "type":"weekly","gives_back_weekly":false},
+                  {"id":"launch-2610-fable","label":"New model launch: one Fable reset",
+                   "resets_total":1,"resets_left":1,"ends_at":"2027-03-09T07:59:00+00:00",
+                   "clears":["seven_day_overage_included"],"paused":false,
+                   "type":"full","gives_back_weekly":true},
+                  {"id":"launch-2610-fable-6mo","label":"one more Fable reset",
+                   "resets_total":1,"resets_left":1,"ends_at":"2027-03-09T07:59:00+00:00",
+                   "clears":["seven_day_overage_included"],"paused":false,
+                   "type":"full","gives_back_weekly":true}]}}"#,
+        )
+        .unwrap();
+        let (_, _, resets) = parse_claude_usage_value(&v).unwrap();
+        let titles: Vec<_> = resets.credits.iter().map(|c| c.title.as_deref()).collect();
+        // Giving back what Fable used outranks the `type`.
+        assert_eq!(
+            titles,
+            [Some("Weekly reset"), Some("Fable reset"), Some("Fable reset")]
+        );
+        assert!(resets.credits.iter().all(|c| c.expires_at.is_some()));
+
+        // One credit per reset left; used-up and paused grants give none; with
+        // no `type`, the cleared windows name the reset.
+        let v = serde_json::json!({
+            "seven_day": {"utilization": 1.0, "resets_at": null},
+            "cedar_ember": {"eligible": true, "grants": [
+                {"resets_left": 2, "clears": ["five_hour"], "paused": false},
+                {"resets_left": 0, "clears": ["seven_day"], "paused": false},
+                {"resets_left": 1, "clears": ["seven_day"], "paused": true},
+                {"resets_left": 1, "clears": ["five_hour", "seven_day"]}
+            ]}
+        });
+        let (_, _, resets) = parse_claude_usage_value(&v).unwrap();
+        let titles: Vec<_> = resets.credits.iter().map(|c| c.title.as_deref()).collect();
+        assert_eq!(
+            titles,
+            [Some("5-hour reset"), Some("5-hour reset"), Some("Full reset")]
+        );
+        assert!(resets.credits.iter().all(|c| c.expires_at.is_none()));
+
+        // Not eligible, a null block or no block at all: no resets.
+        for v in [
+            serde_json::json!({"seven_day": {"utilization": 1.0},
+                "cedar_ember": {"eligible": false, "ineligible_reason": "surface", "grants": []}}),
+            serde_json::json!({"seven_day": {"utilization": 1.0}, "cedar_ember": null}),
+            serde_json::json!({"seven_day": {"utilization": 1.0}}),
+        ] {
+            let (_, _, resets) = parse_claude_usage_value(&v).unwrap();
+            assert!(resets.credits.is_empty());
+        }
     }
 
     #[test]
@@ -1954,11 +2109,11 @@ mod tests {
     #[test]
     fn builds_reset_lines() {
         let now = at(1_000_000);
-        let credit = |title: Option<&str>, expires_at: Option<SystemTime>| CodexResetCredit {
+        let credit = |title: Option<&str>, expires_at: Option<SystemTime>| ResetCredit {
             title: title.map(String::from),
             expires_at,
         };
-        let credits = CodexResetCredits {
+        let credits = ResetCredits {
             credits: vec![
                 credit(Some("Full reset"), Some(at(1_000_000 + 9 * 86400 + 5 * 3600))), // 9d5h
                 credit(None, Some(at(999_000))), // expired: dropped

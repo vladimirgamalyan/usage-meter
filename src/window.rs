@@ -39,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::diagnose;
-use crate::models::{AppUsageData, CodexResetCredits};
+use crate::models::{AppUsageData, ResetCredits};
 use crate::native_interop::{
     rgb, to_wide, to_wide_no_nul, HwndHandle, MSG_DATA_UPDATED, MSG_RESET_CREDITS_UPDATED,
     TIMER_COUNTDOWN, TIMER_FAST_POLL, TIMER_POLL, TIMER_RESET_CREDITS,
@@ -267,6 +267,7 @@ struct AppState {
     codex: ProviderView,
     antigravity: ProviderView,
     codex_reset_lines: Vec<poller::ResetLine>,
+    claude_reset_lines: Vec<poller::ResetLine>,
     show_claude: bool,
     show_codex: bool,
     show_antigravity: bool,
@@ -276,7 +277,7 @@ struct AppState {
     /// Whether the window keeps itself above other windows.
     always_on_top: bool,
     last_data: Option<AppUsageData>,
-    last_reset_credits: Option<CodexResetCredits>,
+    last_reset_credits: Option<ResetCredits>,
     last_reset_count: Option<usize>,
     poll_interval_ms: u64,
     reset_credit_interval_ms: u64,
@@ -360,6 +361,7 @@ fn carry_over_last_data(previous: Option<&AppUsageData>, fresh: &mut AppUsageDat
     if fresh.claude_code.is_none() {
         fresh.claude_code = previous.claude_code;
         fresh.claude_scoped = previous.claude_scoped.clone();
+        fresh.claude_resets = previous.claude_resets.clone();
     }
     if fresh.codex.is_none() {
         fresh.codex = previous.codex;
@@ -455,6 +457,10 @@ fn apply_usage_data(s: &mut AppState, data: &AppUsageData, now: SystemTime) {
 fn recompute_reset_lines(s: &mut AppState, now: SystemTime) {
     s.codex_reset_lines = match (&s.last_reset_credits, s.show_codex) {
         (Some(credits), true) => poller::build_reset_lines(credits, now),
+        _ => Vec::new(),
+    };
+    s.claude_reset_lines = match (&s.last_data, s.show_claude) {
+        (Some(data), true) => poller::build_reset_lines(&data.claude_resets, now),
         _ => Vec::new(),
     };
 }
@@ -610,6 +616,15 @@ fn build_render_model() -> RenderModel {
             color
         }
     };
+    // A reset line has no bar: its label takes the bar's place, and its
+    // countdown is padded to sit under the countdowns above it.
+    let reset_row = |line: &poller::ResetLine| RenderRow {
+        label: line.label.clone(),
+        percent: 0.0,
+        elapsed: None,
+        text: poller::pad_bare_countdown(&line.countdown, s.show_percent),
+        has_bar: false,
+    };
     // With a single provider the window title already names it, so block
     // headings are skipped entirely and their color never comes up.
     if s.show_claude {
@@ -623,6 +638,7 @@ fn build_render_model() -> RenderModel {
                 has_bar: true,
             });
         }
+        rows.extend(s.claude_reset_lines.iter().map(reset_row));
         let stale = s.claude.stale;
         blocks.push(RenderBlock {
             title: strings::PROVIDER_CLAUDE_CODE,
@@ -635,15 +651,7 @@ fn build_render_model() -> RenderModel {
     }
     if s.show_codex {
         let mut rows = usage_rows(&s.codex);
-        for line in &s.codex_reset_lines {
-            rows.push(RenderRow {
-                label: line.label.clone(),
-                percent: 0.0,
-                elapsed: None,
-                text: poller::pad_bare_countdown(&line.countdown, s.show_percent),
-                has_bar: false,
-            });
-        }
+        rows.extend(s.codex_reset_lines.iter().map(reset_row));
         let stale = s.codex.stale;
         blocks.push(RenderBlock {
             title: strings::PROVIDER_CODEX,
@@ -1238,7 +1246,6 @@ fn poll_body(handle: HwndHandle) {
                 s.codex.stale = missing.1 && data.codex.is_some();
                 s.antigravity.stale = missing.2 && data.antigravity.is_some();
                 apply_usage_data(s, &data, now);
-                recompute_reset_lines(s, now);
                 if s.show_codex {
                     // The count piggybacked on the usage response is a free
                     // change signal for the full credit list.
@@ -1251,6 +1258,8 @@ fn poll_body(handle: HwndHandle) {
                     }
                 }
                 s.last_data = Some(data);
+                // After the data is stored: the Claude resets are read from it.
+                recompute_reset_lines(s, now);
             }
             Err((provider, error)) => {
                 s.last_poll_ok = false;
@@ -1502,6 +1511,9 @@ fn reschedule_countdown(hwnd: HWND) {
                 }
                 for l in &data.claude_scoped {
                     consider(l.section.resets_at);
+                }
+                for credit in &data.claude_resets.credits {
+                    consider(credit.expires_at);
                 }
             }
             if s.show_codex {
@@ -2340,6 +2352,7 @@ pub fn run() {
             codex: placeholder_view(strings::PLACEHOLDER_NONE),
             antigravity: placeholder_view(strings::PLACEHOLDER_NONE),
             codex_reset_lines: Vec::new(),
+            claude_reset_lines: Vec::new(),
             show_claude: settings.show_claude_code,
             show_codex: settings.show_codex,
             show_antigravity: settings.show_antigravity,

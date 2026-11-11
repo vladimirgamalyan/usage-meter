@@ -5,7 +5,7 @@ used up, for three providers at once:
 
 | Provider | What it shows |
 |---|---|
-| **Claude Code** (Anthropic) | 5-hour window, 7-day window, and per-model weekly limits (e.g. Fable) when the account has them |
+| **Claude Code** (Anthropic) | 5-hour window, 7-day window, and per-model weekly limits (e.g. Fable) when the account has them, plus granted limit resets (e.g. a Fable reset) |
 | **Codex** (OpenAI/ChatGPT) | both rate-limit windows plus granted rate-limit reset credits |
 | **Antigravity** (Google) | 5-hour and weekly Gemini quota |
 
@@ -31,8 +31,8 @@ glance whether you are burning the limit faster than the clock runs it down.
 
 - Slim pill-style fill bars, light/dark theme following the system, colored
   per provider.
-- Live countdowns that tick without extra network requests; expired Codex
-  reset credits disappear on their own.
+- Live countdowns that tick without extra network requests; expired reset
+  credits disappear on their own.
 - Providers are toggled from the menu; the window resizes to fit.
 - Optional always-on-top mode, off by default.
 - Auth errors pause polling and watch the credential stores (file, WSL,

@@ -14,6 +14,11 @@ pub const PROVIDER_ANTIGRAVITY: &str = "Antigravity";
 pub const LABEL_5H: &str = "5h";
 pub const LABEL_7D: &str = "7d";
 pub const LABEL_RESET_CREDIT: &str = "reset";
+// Claude Code limit resets, named as Claude Code names them.
+pub const LABEL_RESET_SESSION: &str = "5-hour reset";
+pub const LABEL_RESET_WEEKLY: &str = "Weekly reset";
+pub const LABEL_RESET_FULL: &str = "Full reset";
+pub const LABEL_RESET_FABLE: &str = "Fable reset";
 
 pub const PLACEHOLDER_NONE: &str = "--";
 pub const PLACEHOLDER_LOADING: &str = "...";
